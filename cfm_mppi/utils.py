@@ -9,6 +9,12 @@ import cvxpy as cp
 import jax
 import jax.numpy as jnp
 
+from cfm_mppi.vrc.build_vrc import (
+    RobotForceParameters,
+    VRCEllipse,
+    force_from_vrc_tube,
+)
+
 def evaluate(states, controls, pos_obs, goal, r):
     """
     Args:
@@ -70,13 +76,28 @@ class HumanAgent:
         self.state = self.start.copy()
         self.control = np.zeros(2, dtype=np.float32)
 
-    def social_force_step(self, others_states, others_controls, tau=0.5):
-        if np.linalg.norm(self.goal - self.state) < 0.1:
+    def social_force_step(
+        self,
+        others_states,
+        others_controls,
+        tau=0.5,
+        vrc_tube: list[VRCEllipse] | None = None,
+        vrc_current_index: int = 0,
+        vrc_force_params: RobotForceParameters | None = None,
+        vrc_preview_steps: int = 8,
+        vrc_discount: float = 0.85,
+    ):
+        """Advance one SFM step, optionally reacting to a robot VRC tube."""
+        distance_to_goal = np.linalg.norm(self.goal - self.state)
+        if distance_to_goal < 0.1 and not vrc_tube:
             self.control = np.zeros(2, dtype=np.float32)
             return
 
-        goal_direction = (self.goal - self.state) / np.linalg.norm(self.goal - self.state)
-        desired_velocity = self.sfm_des_speed * goal_direction
+        if distance_to_goal < 0.1:
+            desired_velocity = np.zeros(2, dtype=np.float32)
+        else:
+            goal_direction = (self.goal - self.state) / distance_to_goal
+            desired_velocity = self.sfm_des_speed * goal_direction
         
         goal_force = (1/tau) * (desired_velocity - self.control)
 
@@ -89,7 +110,23 @@ class HumanAgent:
             grad = grad_barrier_exp(jnp.array(r_ab), jnp.array(v_rel), self.dt)
             repulsive_force += -1.0 * np.array(grad)
 
-        total_acceleration = goal_force + repulsive_force
+        vrc_force = np.zeros(2, dtype=np.float32)
+        if vrc_tube:
+            if vrc_force_params is None:
+                vrc_force_params = RobotForceParameters()
+            vrc_force = force_from_vrc_tube(
+                pedestrian_position=self.state,
+                vrc_tube=vrc_tube,
+                current_index=min(
+                    max(vrc_current_index, 0),
+                    len(vrc_tube) - 1,
+                ),
+                force_params=vrc_force_params,
+                preview_steps=vrc_preview_steps,
+                discount=vrc_discount,
+            ).astype(np.float32)
+
+        total_acceleration = goal_force + repulsive_force + vrc_force
         
         self.control += total_acceleration * self.dt
         

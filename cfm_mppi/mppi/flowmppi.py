@@ -141,6 +141,237 @@ class FlowMPPI(nn.Module):
         action_cost = mean_action @ self._inv_covariance @ control.T
         return stage_cost, action_cost
 
+    def rollout_si_controls(
+        self,
+        state: torch.Tensor,
+        controls_sin: torch.Tensor,
+        d: float = 0.1,
+        k_p: float = 2.0,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Convert SI controls and roll out all CFM candidates.
+
+        Args:
+            state: Current state, shape ``[1, dim_state]``.
+            controls_sin: CFM controls, shape ``[num_candidates, horizon, 2]``.
+
+        Returns:
+            A pair ``(states, controls_dyn)`` with shapes
+            ``[num_candidates, horizon + 1, dim_state]`` and
+            ``[num_candidates, horizon, 2]``.
+        """
+        state = torch.as_tensor(state, device=self._device, dtype=self._dtype)
+        controls_sin = controls_sin.to(self._device, self._dtype)
+
+        num_candidates, horizon, _ = controls_sin.shape
+        states = torch.zeros(
+            num_candidates,
+            horizon + 1,
+            self._dim_state,
+            device=self._device,
+            dtype=self._dtype,
+        )
+        states[:, 0, :] = state.expand(num_candidates, -1)
+        controls_dyn = torch.zeros_like(controls_sin)
+
+        for step in range(horizon):
+            next_control = (
+                controls_sin[:, step + 1, :] if step < horizon - 1 else None
+            )
+            control_dyn = self._convert_si_to_dynamics(
+                controls_sin[:, step, :],
+                states[:, step, :],
+                d,
+                controls_sin_t_next=next_control,
+                k_p=k_p,
+            )
+            controls_dyn[:, step, :] = torch.clamp(
+                control_dyn, self._u_min, self._u_max
+            )
+            states[:, step + 1, :] = self._dynamics(
+                states[:, step, :], controls_dyn[:, step, :]
+            )
+
+        return states, controls_dyn
+
+    def score_trajectories(
+        self,
+        states: torch.Tensor,
+        controls: torch.Tensor,
+        goal: torch.Tensor,
+        obstacle_state: torch.Tensor,
+        rad: float,
+    ) -> torch.Tensor:
+        """Score trajectories against one shared obstacle prediction."""
+        horizon = controls.shape[1]
+        initial_prev_action = torch.zeros_like(controls[:, :1, :])
+        prev_actions = torch.cat(
+            [initial_prev_action, controls[:, :-1, :]], dim=1
+        )
+        times = torch.arange(horizon, device=states.device)
+        vectorized_cost = torch.vmap(
+            self.cost_func_for_mode,
+            in_dims=(1, 1, 1, 1, 0, None, None),
+            out_dims=1,
+        )
+        stage_costs = vectorized_cost(
+            states[:, :-1, :],
+            controls,
+            obstacle_state,
+            prev_actions,
+            times,
+            goal,
+            rad,
+        )
+        terminal_costs = self._terminal_cost(states[:, -1, :2], goal)
+        return torch.sum(stage_costs, dim=1) + terminal_costs
+
+    def forward_branches(
+        self,
+        state: torch.Tensor,
+        branch_controls: torch.Tensor,
+        goal: torch.Tensor,
+        branch_obstacle_states: torch.Tensor,
+        rad: float,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Run an independent MPPI update for every interaction branch.
+
+        ``branch_obstacle_states[b]`` is only used to score samples belonging to
+        branch ``b``. Sampling is vectorized for speed, while costs, softmax
+        weights, and optimal controls remain branch-local.
+
+        Args:
+            state: Current state, shape ``[1, dim_state]``.
+            branch_controls: Nominal dynamic controls, shape
+                ``[num_branches, horizon, dim_control]``.
+            goal: Goal position, shape ``[2]`` or ``[1, 2]``.
+            branch_obstacle_states: Branch-conditioned pedestrian predictions,
+                shape ``[num_branches, num_pedestrians, horizon, 2]``.
+            rad: Collision radius used by the stage cost.
+
+        Returns:
+            ``(selected_controls, branch_controls_opt, branch_states_opt,
+            branch_costs)``.
+        """
+        state = torch.as_tensor(state, device=self._device, dtype=self._dtype)
+        branch_controls = branch_controls.to(self._device, self._dtype)
+        branch_obstacle_states = branch_obstacle_states.to(
+            self._device, self._dtype
+        )
+        goal = goal.to(self._device, self._dtype).squeeze(0)
+
+        num_branches, horizon, _ = branch_controls.shape
+        if (
+            branch_obstacle_states.shape[0] != num_branches
+            or branch_obstacle_states.shape[2] != horizon
+        ):
+            raise ValueError(
+                "branch_obstacle_states must have shape "
+                "[num_branches, num_pedestrians, horizon, 2]"
+            )
+
+        num_samples = self._num_samples
+        action_noises = self._noise_distribution.rsample(
+            sample_shape=torch.Size([num_branches, num_samples, horizon])
+        )
+        perturbed_controls = torch.clamp(
+            branch_controls[:, None, :, :] + action_noises,
+            self._u_min,
+            self._u_max,
+        )
+
+        flat_controls = perturbed_controls.reshape(
+            num_branches * num_samples, horizon, self._dim_control
+        )
+        flat_states = torch.zeros(
+            num_branches * num_samples,
+            horizon + 1,
+            self._dim_state,
+            device=self._device,
+            dtype=self._dtype,
+        )
+        flat_states[:, 0, :] = state.expand(num_branches * num_samples, -1)
+        for step in range(horizon):
+            flat_states[:, step + 1, :] = self._dynamics(
+                flat_states[:, step, :], flat_controls[:, step, :]
+            )
+
+        sampled_states = flat_states.reshape(
+            num_branches, num_samples, horizon + 1, self._dim_state
+        )
+        sampled_costs = torch.empty(
+            num_branches,
+            num_samples,
+            device=self._device,
+            dtype=self._dtype,
+        )
+        for branch_index in range(num_branches):
+            sampled_costs[branch_index] = self.score_trajectories(
+                sampled_states[branch_index],
+                perturbed_controls[branch_index],
+                goal,
+                branch_obstacle_states[branch_index],
+                rad,
+            )
+
+        previous_reference = None
+        if self.prev_optimal_action_seq is not None:
+            shifted_previous = self.prev_optimal_action_seq[1:]
+            if shifted_previous.shape == branch_controls.shape[1:]:
+                previous_reference = shifted_previous
+        if previous_reference is not None:
+            sampled_costs += 0.1 * torch.sum(
+                (
+                    perturbed_controls
+                    - previous_reference[None, None, :, :]
+                )
+                ** 2,
+                dim=(2, 3),
+            )
+
+        betas = torch.min(sampled_costs, dim=1, keepdim=True).values
+        weights = torch.softmax(
+            -(sampled_costs - betas) / self._lambda, dim=1
+        )
+        optimal_controls = torch.sum(
+            weights[:, :, None, None] * perturbed_controls, dim=1
+        )
+
+        optimal_states = torch.zeros(
+            num_branches,
+            horizon + 1,
+            self._dim_state,
+            device=self._device,
+            dtype=self._dtype,
+        )
+        optimal_states[:, 0, :] = state.expand(num_branches, -1)
+        for step in range(horizon):
+            optimal_states[:, step + 1, :] = self._dynamics(
+                optimal_states[:, step, :], optimal_controls[:, step, :]
+            )
+
+        branch_costs = torch.empty(
+            num_branches, device=self._device, dtype=self._dtype
+        )
+        for branch_index in range(num_branches):
+            branch_costs[branch_index] = self.score_trajectories(
+                optimal_states[branch_index : branch_index + 1],
+                optimal_controls[branch_index : branch_index + 1],
+                goal,
+                branch_obstacle_states[branch_index],
+                rad,
+            )[0]
+
+        selected_branch = torch.argmin(branch_costs)
+        selected_controls = optimal_controls[selected_branch]
+        self.prev_optimal_action_seq = selected_controls.detach()
+
+        return (
+            selected_controls,
+            optimal_controls,
+            optimal_states,
+            branch_costs,
+        )
+
     def forward(self, state, controls_sin, horizon, goal, obstacle_state, rad, d=0.1, k_p=2.0) -> torch.Tensor:
         """
         Solve the optimal control problem.
