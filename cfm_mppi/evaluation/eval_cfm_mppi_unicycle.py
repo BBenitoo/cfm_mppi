@@ -44,7 +44,7 @@ n_sample = 200
 horizon = HORIZON
 noise_level = torch.tensor([0.8], device=device)
 
-checkpoint_path = Path("./output_dir/cfm_transformer/checkpoint.pth")
+checkpoint_path = Path("../output_dir/cfm_transformer/checkpoint.pth")
 args_filepath = checkpoint_path.parent / 'args.json'
 with open(args_filepath, 'r') as f:
     args_dict = json.load(f)
@@ -59,7 +59,7 @@ batch_size = args_dict['batch_size']
 
 # dataset
 if dataset == "ucy" or dataset == "sdd":
-    batch_ego = torch.load(f'./dataset/eval80_ego_{dataset}.pt')
+    batch_ego = torch.load(f'../../dataset/eval80_ego_{dataset}.pt')
     with open(f'./dataset/eval80_obs_{dataset}.pkl', 'rb') as f:
         batch_obs = pickle.load(f)
 elif dataset == "sfm":

@@ -457,7 +457,7 @@ def main() -> None:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     noise_level = torch.tensor([NOISE_LEVEL_VALUE], device=device)
 
-    checkpoint_path = Path("./output_dir/cfm_transformer/checkpoint.pth")
+    checkpoint_path = Path("../output_dir/cfm_transformer/checkpoint.pth")
     model = TransformerModel()
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     model.load_state_dict(checkpoint["model"])
@@ -465,8 +465,8 @@ def main() -> None:
     model.to(device=device)
 
     if dataset in ("ucy", "sdd"):
-        batch_ego = torch.load(f"./dataset/eval80_ego_{dataset}.pt", map_location="cpu")
-        with open(f"./dataset/eval80_obs_{dataset}.pkl", "rb") as file:
+        batch_ego = torch.load(f"../../dataset/eval80_ego_{dataset}.pt", map_location="cpu")
+        with open(f"../../dataset/eval80_obs_{dataset}.pkl", "rb") as file:
             batch_obs = pickle.load(file)
     else:
         batch_ego = torch.zeros(300)
