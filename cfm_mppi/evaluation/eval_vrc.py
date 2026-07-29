@@ -24,8 +24,10 @@ from cfm_mppi.vrc.build_vrc import (
     RobotForceParameters,
     VRCEllipse,
     VRCParameters,
+    build_tensor_vrc_tube,
     build_vrc_tube,
     force_from_vrc_tube,
+    predict_pedestrians_with_tensor_vrc,
 )
 
 if TYPE_CHECKING:
@@ -148,7 +150,7 @@ class BranchPlan:
     pedestrian_predictions: torch.Tensor
     mppi_branch_states: torch.Tensor
     branch_costs: torch.Tensor
-    selected_vrc_tube: list[VRCEllipse]
+    selected_vrc_tube: list[VRCEllipse] | None
 
 
 def constant_velocity_prediction(
@@ -274,6 +276,8 @@ def select_cfm_branches(
     )
 
 
+# Retained as a scalar NumPy reference for regression checks and compatibility.
+# The planner hot path uses predict_pedestrians_with_tensor_vrc instead.
 def predict_pedestrians_with_vrc(
     current_positions: torch.Tensor,
     current_velocities: torch.Tensor,
@@ -334,27 +338,25 @@ def build_branch_pedestrian_predictions(
     prediction_params: PedestrianPredictionParameters,
     dt: float,
 ) -> torch.Tensor:
-    """Build one VRC and one pedestrian prediction for every CFM branch."""
+    """Build and roll out all branch-conditioned predictions on one device."""
     horizon = branch_controls.shape[1]
-    predictions = []
-    for branch_index in range(branch_controls.shape[0]):
-        vrc_tube = build_vrc_tube(
-            states=branch_states[branch_index],
-            controls_uni=branch_controls[branch_index],
-            params=vrc_params,
-        )
-        predictions.append(
-            predict_pedestrians_with_vrc(
-                current_positions=current_positions,
-                current_velocities=current_velocities,
-                vrc_tube=vrc_tube,
-                horizon=horizon,
-                dt=dt,
-                force_params=force_params,
-                prediction_params=prediction_params,
-            )
-        )
-    return torch.stack(predictions, dim=0)
+    vrc_tube = build_tensor_vrc_tube(
+        states=branch_states,
+        controls_uni=branch_controls,
+        params=vrc_params,
+    )
+    return predict_pedestrians_with_tensor_vrc(
+        current_positions=current_positions,
+        current_velocities=current_velocities,
+        vrc_tube=vrc_tube,
+        horizon=horizon,
+        dt=dt,
+        force_params=force_params,
+        relaxation_time=prediction_params.relaxation_time,
+        maximum_speed=prediction_params.maximum_speed,
+        preview_steps=prediction_params.preview_steps,
+        preview_discount=prediction_params.preview_discount,
+    )
 
 
 def plan_vrc_branches(
@@ -373,6 +375,7 @@ def plan_vrc_branches(
     vrc_params: VRCParameters = VRC_PARAMS,
     force_params: RobotForceParameters = ROBOT_FORCE_PARAMS,
     prediction_params: PedestrianPredictionParameters | None = None,
+    build_selected_vrc_tube: bool = True,
 ) -> BranchPlan:
     """Execute CFM -> VRC -> pedestrian prediction -> branch MPPI."""
     if prediction_params is None:
@@ -413,17 +416,18 @@ def plan_vrc_branches(
                 look_ahead_distance=LOOK_AHEAD_DISTANCE,
             )
 
-    with SEGMENT_PROFILER.track("03_vrc_and_pedestrian_prediction"):
-        pedestrian_predictions = build_branch_pedestrian_predictions(
-            branch_states=branch_states,
-            branch_controls=branch_controls,
-            current_positions=current_positions,
-            current_velocities=current_velocities,
-            vrc_params=vrc_params,
-            force_params=force_params,
-            prediction_params=prediction_params,
-            dt=config.dt,
-        )
+    with torch.no_grad():
+        with SEGMENT_PROFILER.track("03_vrc_and_pedestrian_prediction"):
+            pedestrian_predictions = build_branch_pedestrian_predictions(
+                branch_states=branch_states,
+                branch_controls=branch_controls,
+                current_positions=current_positions,
+                current_velocities=current_velocities,
+                vrc_params=vrc_params,
+                force_params=force_params,
+                prediction_params=prediction_params,
+                dt=config.dt,
+            )
 
     with torch.no_grad():
         with SEGMENT_PROFILER.track("04_branch_mppi"):
@@ -443,10 +447,14 @@ def plan_vrc_branches(
     with SEGMENT_PROFILER.track("05_final_selection_and_vrc"):
         selected_branch = int(torch.argmin(branch_costs).item())
         selected_cfm_index = int(branch_indices[selected_branch].item())
-        selected_vrc_tube = build_vrc_tube(
-            states=mppi_branch_states[selected_branch],
-            controls_uni=selected_controls,
-            params=vrc_params,
+        selected_vrc_tube = (
+            build_vrc_tube(
+                states=mppi_branch_states[selected_branch],
+                controls_uni=selected_controls,
+                params=vrc_params,
+            )
+            if build_selected_vrc_tube
+            else None
         )
     return BranchPlan(
         selected_controls=selected_controls,
@@ -711,6 +719,7 @@ def main() -> None:
                 current_velocities=current_velocities,
                 planning_horizon=x_t.shape[-1],
                 histories=histories,
+                build_selected_vrc_tube=dataset == "sfm",
             )
             active_vrc_tube = plan.selected_vrc_tube
 
