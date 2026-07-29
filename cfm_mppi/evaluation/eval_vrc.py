@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import defaultdict
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 import pickle
@@ -55,6 +57,73 @@ MAX_HISTORY_LENGTH = 10
 
 VRC_PARAMS = VRCParameters()
 ROBOT_FORCE_PARAMS = RobotForceParameters()
+
+
+class SegmentProfiler:
+    """Collect synchronized wall-clock timings for mixed CPU/CUDA stages."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+        self.device: torch.device | None = None
+        self.samples: defaultdict[str, list[float]] = defaultdict(list)
+
+    def _synchronize(self) -> None:
+        if self.device is not None and self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    @contextmanager
+    def track(self, name: str):
+        if not self.enabled:
+            yield
+            return
+
+        # CUDA kernels are asynchronous. Synchronizing at both boundaries keeps
+        # work from adjacent stages out of this stage's wall-clock measurement.
+        self._synchronize()
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            self._synchronize()
+            elapsed_ms = (time.perf_counter() - start) * 1000.0
+            self.samples[name].append(elapsed_ms)
+
+    def report(self) -> None:
+        reference_steps = len(self.samples.get("01_cfm", []))
+        if reference_steps == 0:
+            print("No profiling samples were collected.", flush=True)
+            return
+
+        total_measured = sum(
+            sum(stage_samples) for stage_samples in self.samples.values()
+        )
+        print("\n========== SEGMENT PERFORMANCE ==========", flush=True)
+        print(
+            f"{'stage':34s}"
+            f"{'ms/plan step':>15s}"
+            f"{'share':>10s}"
+            f"{'p50/call':>12s}"
+            f"{'p95/call':>12s}"
+            f"{'calls':>8s}",
+            flush=True,
+        )
+        for name in sorted(self.samples):
+            values = np.asarray(self.samples[name], dtype=np.float64)
+            stage_total = values.sum()
+            print(
+                f"{name:34s}"
+                f"{stage_total / reference_steps:15.3f}"
+                f"{100.0 * stage_total / total_measured:9.1f}%"
+                f"{np.percentile(values, 50):12.3f}"
+                f"{np.percentile(values, 95):12.3f}"
+                f"{len(values):8d}",
+                flush=True,
+            )
+        print(f"Profiled planning steps: {reference_steps}", flush=True)
+        print("=========================================\n", flush=True)
+
+
+SEGMENT_PROFILER = SegmentProfiler()
 
 
 @dataclass
@@ -310,70 +379,75 @@ def plan_vrc_branches(
         prediction_params = PedestrianPredictionParameters()
 
     with torch.no_grad():
-        (
-            cfm_controls,
-            future_cfm_controls,
-            constant_velocity_obstacles,
-            _,
-        ) = generate_cfm_candidates(
-            model=model,
-            config=config,
-            state=state,
-            goal=goal,
-            noisy_action_seq=noisy_action_seq,
-            noise_level=noise_level,
+        with SEGMENT_PROFILER.track("01_cfm"):
+            (
+                cfm_controls,
+                future_cfm_controls,
+                constant_velocity_obstacles,
+                _,
+            ) = generate_cfm_candidates(
+                model=model,
+                config=config,
+                state=state,
+                goal=goal,
+                noisy_action_seq=noisy_action_seq,
+                noise_level=noise_level,
+                current_positions=current_positions,
+                current_velocities=current_velocities,
+                planning_horizon=planning_horizon,
+                histories=histories,
+            )
+        with SEGMENT_PROFILER.track("02_candidate_rollout_and_rank"):
+            (
+                branch_indices,
+                branch_states,
+                branch_controls,
+            ) = select_cfm_branches(
+                solver=solver,
+                state=state,
+                controls_sin=future_cfm_controls,
+                goal=goal,
+                obstacle_prediction=constant_velocity_obstacles,
+                num_branches=num_branches,
+                radius=config.agent_radius,
+                look_ahead_distance=LOOK_AHEAD_DISTANCE,
+            )
+
+    with SEGMENT_PROFILER.track("03_vrc_and_pedestrian_prediction"):
+        pedestrian_predictions = build_branch_pedestrian_predictions(
+            branch_states=branch_states,
+            branch_controls=branch_controls,
             current_positions=current_positions,
             current_velocities=current_velocities,
-            planning_horizon=planning_horizon,
-            histories=histories,
+            vrc_params=vrc_params,
+            force_params=force_params,
+            prediction_params=prediction_params,
+            dt=config.dt,
         )
-        (
-            branch_indices,
-            branch_states,
-            branch_controls,
-        ) = select_cfm_branches(
-            solver=solver,
-            state=state,
-            controls_sin=future_cfm_controls,
-            goal=goal,
-            obstacle_prediction=constant_velocity_obstacles,
-            num_branches=num_branches,
-            radius=config.agent_radius,
-            look_ahead_distance=LOOK_AHEAD_DISTANCE,
-        )
-
-    pedestrian_predictions = build_branch_pedestrian_predictions(
-        branch_states=branch_states,
-        branch_controls=branch_controls,
-        current_positions=current_positions,
-        current_velocities=current_velocities,
-        vrc_params=vrc_params,
-        force_params=force_params,
-        prediction_params=prediction_params,
-        dt=config.dt,
-    )
 
     with torch.no_grad():
-        (
-            selected_controls,
-            _,
-            mppi_branch_states,
-            branch_costs,
-        ) = solver.forward_branches(
-            state=state,
-            branch_controls=branch_controls,
-            goal=goal,
-            branch_obstacle_states=pedestrian_predictions,
-            rad=config.agent_radius,
-        )
+        with SEGMENT_PROFILER.track("04_branch_mppi"):
+            (
+                selected_controls,
+                _,
+                mppi_branch_states,
+                branch_costs,
+            ) = solver.forward_branches(
+                state=state,
+                branch_controls=branch_controls,
+                goal=goal,
+                branch_obstacle_states=pedestrian_predictions,
+                rad=config.agent_radius,
+            )
 
-    selected_branch = int(torch.argmin(branch_costs).item())
-    selected_cfm_index = int(branch_indices[selected_branch].item())
-    selected_vrc_tube = build_vrc_tube(
-        states=mppi_branch_states[selected_branch],
-        controls_uni=selected_controls,
-        params=vrc_params,
-    )
+    with SEGMENT_PROFILER.track("05_final_selection_and_vrc"):
+        selected_branch = int(torch.argmin(branch_costs).item())
+        selected_cfm_index = int(branch_indices[selected_branch].item())
+        selected_vrc_tube = build_vrc_tube(
+            states=mppi_branch_states[selected_branch],
+            controls_uni=selected_controls,
+            params=vrc_params,
+        )
     return BranchPlan(
         selected_controls=selected_controls,
         selected_cfm_controls=cfm_controls[selected_cfm_index : selected_cfm_index + 1],
@@ -432,7 +506,6 @@ def update_sfm_environment(
             human.control, device=velocities.device
         )
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Evaluate closed-loop CFM-VRC-MPPI planning."
@@ -443,7 +516,37 @@ def parse_args() -> argparse.Namespace:
         default="sfm",
         choices=("ucy", "sdd", "sfm"),
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Collect synchronized per-stage CPU/CUDA timings.",
+    )
+    parser.add_argument(
+        "--profile-only",
+        action="store_true",
+        help=(
+            "Stop after the profiled scenarios and skip writing evaluation results. "
+            "This option also enables profiling."
+        ),
+    )
+    parser.add_argument(
+        "--profile-scenarios",
+        type=int,
+        default=1,
+        help="Number of initial scenarios to profile (default: 1).",
+    )
+    parser.add_argument(
+        "--profile-warmup-steps",
+        type=int,
+        default=10,
+        help="Closed-loop steps to skip before collecting timings (default: 10).",
+    )
+    args = parser.parse_args()
+    if args.profile_scenarios < 1:
+        parser.error("--profile-scenarios must be at least 1")
+    if not 0 <= args.profile_warmup_steps < HORIZON:
+        parser.error(f"--profile-warmup-steps must be in [0, {HORIZON - 1}]")
+    return args
 
 
 def main() -> None:
@@ -455,6 +558,8 @@ def main() -> None:
     np.random.seed(0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    profile_enabled = args.profile or args.profile_only
+    SEGMENT_PROFILER.device = device
     noise_level = torch.tensor([NOISE_LEVEL_VALUE], device=device)
 
     checkpoint_path = Path("../output_dir/cfm_transformer/checkpoint.pth")
@@ -548,18 +653,32 @@ def main() -> None:
         total_time = 0.0
         active_vrc_tube = None
         for step in range(HORIZON):
+            SEGMENT_PROFILER.enabled = (
+                profile_enabled
+                and scenario_index < args.profile_scenarios
+                and step >= args.profile_warmup_steps
+            )
+            if (
+                SEGMENT_PROFILER.enabled
+                and scenario_index == 0
+                and step == args.profile_warmup_steps
+                and device.type == "cuda"
+            ):
+                torch.cuda.reset_peak_memory_stats(device)
+
             if dataset == "sfm":
-                update_sfm_environment(
-                    humans=humans,
-                    positions=pos_obs,
-                    velocities=vel_obs,
-                    state=state,
-                    histories=histories,
-                    time_index=step,
-                    vrc_tube=active_vrc_tube,
-                    vrc_force_params=ROBOT_FORCE_PARAMS,
-                    vrc_current_index=0,
-                )
+                with SEGMENT_PROFILER.track("00_sfm_environment"):
+                    update_sfm_environment(
+                        humans=humans,
+                        positions=pos_obs,
+                        velocities=vel_obs,
+                        state=state,
+                        histories=histories,
+                        time_index=step,
+                        vrc_tube=active_vrc_tube,
+                        vrc_force_params=ROBOT_FORCE_PARAMS,
+                        vrc_current_index=0,
+                    )
 
             time_start = time.time()
             current_positions = pos_obs[:, :, :, step]
@@ -595,44 +714,47 @@ def main() -> None:
             )
             active_vrc_tube = plan.selected_vrc_tube
 
-            control_dyn = plan.selected_controls[0].unsqueeze(0)
-            state = unicycle_dynamics(state, control_dyn, DT)
-            state_hist[:, step + 1] = state.cpu()
-            control_hist[:, step] = control_dyn.cpu()
+            with SEGMENT_PROFILER.track("06_execute_and_cpu_copy"):
+                control_dyn = plan.selected_controls[0].unsqueeze(0)
+                state = unicycle_dynamics(state, control_dyn, DT)
+                state_hist[:, step + 1] = state.cpu()
+                control_hist[:, step] = control_dyn.cpu()
             total_time += time.time() - time_start
 
             if step == HORIZON - 1:
                 break
 
-            selected_cfm_controls = plan.selected_cfm_controls
-            history_length = len(histories["ego_control_sin"])
-            noise = torch.randn(
-                N_CFM_SAMPLES,
-                selected_cfm_controls.shape[1],
-                selected_cfm_controls.shape[2],
-                device=device,
-            )
-            x_t = (
-                noise_level * selected_cfm_controls / SPACE_SCALE
-                + (1.0 - noise_level) * noise
-            )
-            x_t = x_t[:, :, history_length + 1 :]
+            with SEGMENT_PROFILER.track("07_warm_start_update"):
+                selected_cfm_controls = plan.selected_cfm_controls
+                history_length = len(histories["ego_control_sin"])
+                noise = torch.randn(
+                    N_CFM_SAMPLES,
+                    selected_cfm_controls.shape[1],
+                    selected_cfm_controls.shape[2],
+                    device=device,
+                )
+                x_t = (
+                    noise_level * selected_cfm_controls / SPACE_SCALE
+                    + (1.0 - noise_level) * noise
+                )
+                x_t = x_t[:, :, history_length + 1 :]
 
-            histories["ego_control_sin"].update(
-                selected_cfm_controls[:, :, history_length]
-            )
-            histories["ego_state"].update(state)
-            histories["obs_state"].update(current_positions)
-            histories["obs_control"].update(current_velocities)
+                histories["ego_control_sin"].update(
+                    selected_cfm_controls[:, :, history_length]
+                )
+                histories["ego_state"].update(state)
+                histories["obs_state"].update(current_positions)
+                histories["obs_control"].update(current_velocities)
 
-            control_history = histories["ego_control_sin"].get()
-            x_t = torch.cat(
-                [
-                    control_history.expand(N_CFM_SAMPLES, -1, -1) / SPACE_SCALE,
-                    x_t,
-                ],
-                dim=-1,
-            )
+                control_history = histories["ego_control_sin"].get()
+                x_t = torch.cat(
+                    [
+                        control_history.expand(N_CFM_SAMPLES, -1, -1)
+                        / SPACE_SCALE,
+                        x_t,
+                    ],
+                    dim=-1,
+                )
 
         collision, distance = evaluate(
             state_hist[:, 1:],
@@ -647,6 +769,22 @@ def main() -> None:
         state_trajectories[scenario_index] = state_hist
         control_trajectories[scenario_index] = control_hist
         print(scenario_index, flush=True)
+
+        if profile_enabled and scenario_index + 1 == args.profile_scenarios:
+            SEGMENT_PROFILER.report()
+            if device.type == "cuda":
+                print(
+                    "Peak allocated CUDA memory: "
+                    f"{torch.cuda.max_memory_allocated(device) / 1024**2:.1f} MiB",
+                    flush=True,
+                )
+                print(
+                    "Peak reserved CUDA memory: "
+                    f"{torch.cuda.max_memory_reserved(device) / 1024**2:.1f} MiB",
+                    flush=True,
+                )
+            if args.profile_only:
+                return
 
     all_average_times = torch.as_tensor(all_average_times)
     all_collisions = torch.as_tensor(all_collisions).float()
