@@ -1,7 +1,19 @@
+"""Evaluate constant-velocity planning with VRC-reactive pedestrians.
+
+This ablation keeps the CFM branch selection and branch-wise MPPI structure from
+``eval_vrc.py``, but every MPPI branch scores against the same constant-velocity
+pedestrian prediction.  The selected robot plan still creates a VRC tube that is
+used by the next real SFM pedestrian update.  Consequently, pedestrian reactions
+affect future observations but are not anticipated inside the current plan.
+
+The planning/response coupling interpretation applies directly to the ``sfm``
+dataset.  ``ucy`` and ``sdd`` use recorded pedestrian trajectories and therefore
+only compare the planner-side prediction models.
+"""
+
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
 from pathlib import Path
 import pickle
 import time
@@ -16,294 +28,48 @@ from cfm_mppi.evaluation.eval_utils import (
     FreezingMetrics,
     compute_episode_metrics,
     compute_freezing_metrics,
-    run_CFM,
     summarize_freezing_metrics,
     summarize_metrics,
 )
+from cfm_mppi.evaluation.eval_vrc import (
+    DT,
+    FREEZING_GOAL_DISTANCE_THRESHOLD,
+    FREEZING_MINIMUM_DURATION,
+    FREEZING_SPEED_THRESHOLD,
+    GOAL_COEF,
+    HORIZON,
+    LOOK_AHEAD_DISTANCE,
+    MAX_HISTORY_LENGTH,
+    MPPI_LAMBDA,
+    MPPI_SIGMA,
+    NOISE_LEVEL_VALUE,
+    N_BRANCHES,
+    N_CFM_SAMPLES,
+    N_MPPI_SAMPLES,
+    ODE_TIMES,
+    ODE_TIMES_WARM,
+    ROBOT_FORCE_PARAMS,
+    SAFE_COEF,
+    SAFE_MARGIN,
+    SPACE_SCALE,
+    U_MAX,
+    U_MIN,
+    VRC_PARAMS,
+    BranchPlan,
+    generate_cfm_candidates,
+    select_cfm_branches,
+    update_sfm_environment,
+)
 from cfm_mppi.models.transformer import TransformerModel
 from cfm_mppi.mppi.flowmppi import FlowMPPI
-from cfm_mppi.mppi.utils import (
-    stage_cost,
-    terminal_cost,
-    unicycle_dynamics,
-)
-from cfm_mppi.vrc.build_vrc import (
-    RobotForceParameters,
-    VRCEllipse,
-    VRCParameters,
-    build_tensor_vrc_tube,
-    build_vrc_tube,
-    force_from_vrc_tube,
-    predict_pedestrians_with_tensor_vrc,
-)
+from cfm_mppi.mppi.utils import stage_cost, terminal_cost, unicycle_dynamics
+from cfm_mppi.vrc.build_vrc import VRCParameters, build_vrc_tube
 
 if TYPE_CHECKING:
-    from cfm_mppi.utils import AgentHistory, HumanAgent
+    from cfm_mppi.utils import AgentHistory
 
 
-# Evaluation horizon and CFM parameters
-SAFE_MARGIN = 0.5
-HORIZON = 80
-SAFE_COEF = [0.1, 0.3, 0.5, 0.7, 0.9]
-GOAL_COEF = 0.1
-ODE_TIMES = [0.5, 0.8, 0.85, 0.9, 0.92, 0.94, 0.96, 0.98, 1.0]
-ODE_TIMES_WARM = [0.85, 0.9, 0.92, 0.94, 0.96, 0.98, 1.0]
-NOISE_LEVEL_VALUE = 0.8
-
-# MPPI parameters. Each of the N_BRANCHES gets N_MPPI_SAMPLES samples.
-N_CFM_SAMPLES = 200
-N_BRANCHES = 10
-N_MPPI_SAMPLES = 200
-MPPI_SIGMA = torch.tensor([0.3, 0.6])
-MPPI_LAMBDA = 0.1
-U_MIN = torch.tensor([-2.0, -2.0])
-U_MAX = torch.tensor([2.0, 2.0])
-LOOK_AHEAD_DISTANCE = 0.1
-
-SPACE_SCALE = 10.0
-DT = 0.1
-MAX_HISTORY_LENGTH = 10
-# A freeze is one maximal low-speed interval away from the goal.
-FREEZING_MINIMUM_DURATION = 1.0
-FREEZING_SPEED_THRESHOLD = 0.05
-FREEZING_GOAL_DISTANCE_THRESHOLD = 0.5
-
-VRC_PARAMS = VRCParameters()
-ROBOT_FORCE_PARAMS = RobotForceParameters()
-
-
-@dataclass
-class PedestrianPredictionParameters:
-    """Parameters for a VRC-conditioned pedestrian rollout."""
-
-    relaxation_time: float = 0.5
-    maximum_speed: float = 2.0
-    preview_steps: int = 8
-    preview_discount: float = 0.85
-
-
-@dataclass
-class BranchPlan:
-    """All branch-dependent outputs needed by one closed-loop step."""
-
-    selected_controls: torch.Tensor
-    selected_cfm_controls: torch.Tensor
-    selected_branch: int
-    cfm_branch_indices: torch.Tensor
-    cfm_branch_states: torch.Tensor
-    pedestrian_predictions: torch.Tensor
-    mppi_branch_states: torch.Tensor
-    branch_costs: torch.Tensor
-    selected_vrc_tube: list[VRCEllipse] | None
-
-
-def constant_velocity_prediction(
-    positions: torch.Tensor,
-    velocities: torch.Tensor,
-    horizon: int,
-    dt: float,
-) -> torch.Tensor:
-    """Predict future positions with shape ``[1, num_pedestrians, 2, horizon]``."""
-    offsets = (
-        torch.arange(
-            1,
-            horizon + 1,
-            device=positions.device,
-            dtype=positions.dtype,
-        )
-        * dt
-    )
-    return positions.unsqueeze(-1) + velocities.unsqueeze(-1) * offsets
-
-
-def generate_cfm_candidates(
-    model: TransformerModel,
-    config: CFMConfig,
-    state: torch.Tensor,
-    goal: torch.Tensor,
-    noisy_action_seq: torch.Tensor,
-    noise_level: torch.Tensor,
-    current_positions: torch.Tensor,
-    current_velocities: torch.Tensor,
-    planning_horizon: int,
-    histories: dict[str, AgentHistory],
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
-    """Run only CFM and return its future candidate controls.
-
-    The original ``synthesize_control`` immediately invokes MPPI using a single
-    constant-velocity obstacle prediction. VRC planning needs to stop between
-    these two stages so that every CFM branch can create its own pedestrian
-    prediction first.
-    """
-    state_history = histories["ego_state"].get()
-    control_history = histories["ego_control_sin"].get()
-    obstacle_state_history = histories["obs_state"].get()
-    obstacle_control_history = histories["obs_control"].get()
-    history_length = len(histories["ego_state"])
-    future_horizon = planning_horizon - history_length
-    if future_horizon <= 0:
-        raise ValueError("The planning horizon must exceed the history length.")
-
-    future_positions = constant_velocity_prediction(
-        current_positions, current_velocities, future_horizon, config.dt
-    )
-    future_velocities = current_velocities.unsqueeze(-1).expand(
-        -1, -1, -1, future_horizon
-    )
-
-    if control_history is None:
-        obstacle_positions = future_positions
-        obstacle_velocities = future_velocities
-        origin = state[:, :2]
-    else:
-        obstacle_positions = torch.cat(
-            [obstacle_state_history, future_positions], dim=-1
-        )
-        obstacle_velocities = torch.cat(
-            [obstacle_control_history, future_velocities], dim=-1
-        )
-        origin = state_history[:, :2, 0]
-
-    goal_cfm = goal - origin
-    obstacle_positions_cfm = obstacle_positions - origin.unsqueeze(1).unsqueeze(-1)
-    controls_sin = run_CFM(
-        model=model,
-        config=config,
-        noisy_action_seq=noisy_action_seq,
-        noise_level=noise_level,
-        start_pos=torch.zeros(1, 2, device=config.device),
-        goal_pos=goal_cfm,
-        obs_positions=obstacle_positions_cfm,
-        obs_velocities=obstacle_velocities,
-        control_history=control_history,
-    ).detach()
-
-    future_controls_sin = controls_sin[:, :, history_length:].transpose(1, 2)
-    future_obstacles = (
-        obstacle_positions[:, :, :, history_length:].squeeze(0).transpose(1, 2)
-    )
-    return (
-        controls_sin,
-        future_controls_sin,
-        future_obstacles,
-        history_length,
-    )
-
-
-def select_cfm_branches(
-    solver: FlowMPPI,
-    state: torch.Tensor,
-    controls_sin: torch.Tensor,
-    goal: torch.Tensor,
-    obstacle_prediction: torch.Tensor,
-    num_branches: int,
-    radius: float,
-    look_ahead_distance: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Roll out CFM candidates and retain the lowest-cost nominal branches."""
-    candidate_states, candidate_controls = solver.rollout_si_controls(
-        state, controls_sin, d=look_ahead_distance
-    )
-    candidate_costs = solver.score_trajectories(
-        candidate_states,
-        candidate_controls,
-        goal.squeeze(),
-        obstacle_prediction,
-        radius,
-    )
-    branch_count = min(num_branches, candidate_controls.shape[0])
-    branch_indices = torch.topk(candidate_costs, k=branch_count, largest=False).indices
-    return (
-        branch_indices,
-        candidate_states[branch_indices],
-        candidate_controls[branch_indices],
-    )
-
-
-# Retained as a scalar NumPy reference for regression checks and compatibility.
-# The planner hot path uses predict_pedestrians_with_tensor_vrc instead.
-def predict_pedestrians_with_vrc(
-    current_positions: torch.Tensor,
-    current_velocities: torch.Tensor,
-    vrc_tube,
-    horizon: int,
-    dt: float,
-    force_params: RobotForceParameters,
-    prediction_params: PedestrianPredictionParameters,
-) -> torch.Tensor:
-    """Predict pedestrians under the VRC induced by one robot branch.
-
-    The current measured velocity is the pedestrian's baseline intent. A
-    relaxation term prevents a temporary VRC force from permanently increasing
-    velocity after the robot is no longer influential.
-
-    Returns:
-        Tensor with shape ``[num_pedestrians, horizon, 2]``.
-    """
-    device = current_positions.device
-    dtype = current_positions.dtype
-    positions = current_positions.squeeze(0).detach().cpu().numpy().astype(np.float64)
-    velocities = current_velocities.squeeze(0).detach().cpu().numpy().astype(np.float64)
-    baseline_velocities = velocities.copy()
-    prediction = np.empty((positions.shape[0], horizon, 2), dtype=np.float64)
-
-    for step in range(horizon):
-        for pedestrian_index in range(positions.shape[0]):
-            vrc_force = force_from_vrc_tube(
-                pedestrian_position=positions[pedestrian_index],
-                vrc_tube=vrc_tube,
-                current_index=min(step, len(vrc_tube) - 1),
-                force_params=force_params,
-                preview_steps=prediction_params.preview_steps,
-                discount=prediction_params.preview_discount,
-            )
-            relaxation_force = (
-                baseline_velocities[pedestrian_index] - velocities[pedestrian_index]
-            ) / max(prediction_params.relaxation_time, 1e-6)
-            velocities[pedestrian_index] += (relaxation_force + vrc_force) * dt
-
-            speed = np.linalg.norm(velocities[pedestrian_index])
-            if speed > prediction_params.maximum_speed:
-                velocities[pedestrian_index] *= prediction_params.maximum_speed / speed
-            positions[pedestrian_index] += velocities[pedestrian_index] * dt
-
-        prediction[:, step, :] = positions
-
-    return torch.as_tensor(prediction, device=device, dtype=dtype)
-
-
-def build_branch_pedestrian_predictions(
-    branch_states: torch.Tensor,
-    branch_controls: torch.Tensor,
-    current_positions: torch.Tensor,
-    current_velocities: torch.Tensor,
-    vrc_params: VRCParameters,
-    force_params: RobotForceParameters,
-    prediction_params: PedestrianPredictionParameters,
-    dt: float,
-) -> torch.Tensor:
-    """Build and roll out all branch-conditioned predictions on one device."""
-    horizon = branch_controls.shape[1]
-    vrc_tube = build_tensor_vrc_tube(
-        states=branch_states,
-        controls_uni=branch_controls,
-        params=vrc_params,
-    )
-    return predict_pedestrians_with_tensor_vrc(
-        current_positions=current_positions,
-        current_velocities=current_velocities,
-        vrc_tube=vrc_tube,
-        horizon=horizon,
-        dt=dt,
-        force_params=force_params,
-        relaxation_time=prediction_params.relaxation_time,
-        maximum_speed=prediction_params.maximum_speed,
-        preview_steps=prediction_params.preview_steps,
-        preview_discount=prediction_params.preview_discount,
-    )
-
-
-def plan_vrc_branches(
+def plan_with_constant_velocity_prediction(
     model: TransformerModel,
     solver: FlowMPPI,
     config: CFMConfig,
@@ -317,14 +83,13 @@ def plan_vrc_branches(
     histories: dict[str, AgentHistory],
     num_branches: int = N_BRANCHES,
     vrc_params: VRCParameters = VRC_PARAMS,
-    force_params: RobotForceParameters = ROBOT_FORCE_PARAMS,
-    prediction_params: PedestrianPredictionParameters | None = None,
     build_selected_vrc_tube: bool = True,
 ) -> BranchPlan:
-    """Execute CFM -> VRC -> pedestrian prediction -> branch MPPI."""
-    if prediction_params is None:
-        prediction_params = PedestrianPredictionParameters()
+    """Plan against constant-velocity pedestrians, then build an environment VRC.
 
+    The selected VRC tube is an output only: it is never used to construct the
+    pedestrian trajectories passed to MPPI in this planning call.
+    """
     with torch.no_grad():
         (
             cfm_controls,
@@ -358,19 +123,14 @@ def plan_vrc_branches(
             look_ahead_distance=LOOK_AHEAD_DISTANCE,
         )
 
-    with torch.no_grad():
-        pedestrian_predictions = build_branch_pedestrian_predictions(
-            branch_states=branch_states,
-            branch_controls=branch_controls,
-            current_positions=current_positions,
-            current_velocities=current_velocities,
-            vrc_params=vrc_params,
-            force_params=force_params,
-            prediction_params=prediction_params,
-            dt=config.dt,
+        # Every robot branch sees the same CV pedestrian future.  Keeping the
+        # branch dimension preserves eval_vrc's MPPI sampling structure while
+        # removing branch-conditioned/VRC-conditioned pedestrian prediction.
+        branch_obstacle_predictions = (
+            constant_velocity_obstacles.unsqueeze(0)
+            .expand(branch_controls.shape[0], -1, -1, -1)
+            .contiguous()
         )
-
-    with torch.no_grad():
         (
             selected_controls,
             _,
@@ -380,7 +140,7 @@ def plan_vrc_branches(
             state=state,
             branch_controls=branch_controls,
             goal=goal,
-            branch_obstacle_states=pedestrian_predictions,
+            branch_obstacle_states=branch_obstacle_predictions,
             rad=config.agent_radius,
         )
 
@@ -397,65 +157,25 @@ def plan_vrc_branches(
     )
     return BranchPlan(
         selected_controls=selected_controls,
-        selected_cfm_controls=cfm_controls[selected_cfm_index : selected_cfm_index + 1],
+        selected_cfm_controls=cfm_controls[
+            selected_cfm_index : selected_cfm_index + 1
+        ],
         selected_branch=selected_branch,
         cfm_branch_indices=branch_indices,
         cfm_branch_states=branch_states,
-        pedestrian_predictions=pedestrian_predictions,
+        pedestrian_predictions=branch_obstacle_predictions,
         mppi_branch_states=mppi_branch_states,
         branch_costs=branch_costs,
         selected_vrc_tube=selected_vrc_tube,
     )
 
 
-def update_sfm_environment(
-    humans: list[HumanAgent],
-    positions: torch.Tensor,
-    velocities: torch.Tensor,
-    state: torch.Tensor,
-    histories: dict[str, AgentHistory],
-    time_index: int,
-    vrc_tube: list[VRCEllipse] | None = None,
-    vrc_force_params: RobotForceParameters = ROBOT_FORCE_PARAMS,
-    vrc_current_index: int = 0,
-) -> None:
-    """Advance synthetic pedestrians using human-human and robot-VRC forces."""
-    if time_index == 0:
-        return
-
-    num_humans = len(humans)
-    has_vrc = vrc_tube is not None and len(vrc_tube) > 0
-    robot_velocity = None
-    if not has_vrc:
-        robot_velocity = histories["ego_control_sin"].get()[:, :, -1].cpu()
-    for human_index, human in enumerate(humans):
-        other_indices = np.r_[0:human_index, human_index + 1 : num_humans]
-        other_states = positions[0, other_indices, :, time_index - 1].cpu()
-        other_controls = velocities[0, other_indices, :, time_index - 1].cpu()
-
-        # When a VRC is available it replaces the robot's point-agent force,
-        # avoiding double-counting the same robot interaction.
-        if not has_vrc:
-            other_states = torch.cat([other_states, state[:, :2].cpu()], dim=0)
-            other_controls = torch.cat([other_controls, robot_velocity], dim=0)
-
-        human.social_force_step(
-            other_states.numpy(),
-            other_controls.numpy(),
-            vrc_tube=vrc_tube,
-            vrc_current_index=vrc_current_index,
-            vrc_force_params=vrc_force_params,
-        )
-        positions[0, human_index, :, time_index] = torch.as_tensor(
-            human.state, device=positions.device
-        )
-        velocities[0, human_index, :, time_index] = torch.as_tensor(
-            human.control, device=velocities.device
-        )
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Evaluate closed-loop CFM-VRC-MPPI planning."
+        description=(
+            "Evaluate constant-velocity MPPI prediction with VRC-reactive "
+            "pedestrian updates."
+        )
     )
     parser.add_argument(
         "dataset",
@@ -467,9 +187,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
+    args = parse_args()
     from cfm_mppi.utils import AgentHistory, HumanAgent
 
-    args = parse_args()
     dataset = args.dataset
     torch.manual_seed(0)
     np.random.seed(0)
@@ -485,7 +205,10 @@ def main() -> None:
     model.to(device=device)
 
     if dataset in ("ucy", "sdd"):
-        batch_ego = torch.load(f"../../dataset/eval80_ego_{dataset}.pt", map_location="cpu")
+        batch_ego = torch.load(
+            f"../../dataset/eval80_ego_{dataset}.pt",
+            map_location="cpu",
+        )
         with open(f"../../dataset/eval80_obs_{dataset}.pkl", "rb") as file:
             batch_obs = pickle.load(file)
     else:
@@ -495,10 +218,12 @@ def main() -> None:
     episodes: list[EpisodeMetrics] = []
     freezing_episodes: list[FreezingMetrics] = []
     state_trajectories = torch.zeros(
-        [batch_ego.shape[0], 3, HORIZON + 1], dtype=torch.float32
+        [batch_ego.shape[0], 3, HORIZON + 1],
+        dtype=torch.float32,
     )
     control_trajectories = torch.zeros(
-        [batch_ego.shape[0], 2, HORIZON], dtype=torch.float32
+        [batch_ego.shape[0], 2, HORIZON],
+        dtype=torch.float32,
     )
 
     for scenario_index in range(batch_ego.shape[0]):
@@ -525,10 +250,12 @@ def main() -> None:
             vel_obs = torch.zeros_like(pos_obs)
             for human_index, human in enumerate(humans):
                 pos_obs[0, human_index, :, 0] = torch.as_tensor(
-                    human.state, device=device
+                    human.state,
+                    device=device,
                 )
                 vel_obs[0, human_index, :, 0] = torch.as_tensor(
-                    human.control, device=device
+                    human.control,
+                    device=device,
                 )
 
         solver = FlowMPPI(
@@ -600,7 +327,7 @@ def main() -> None:
                 goal_margin_coef=GOAL_COEF,
                 device=device,
             )
-            plan = plan_vrc_branches(
+            plan = plan_with_constant_velocity_prediction(
                 model=model,
                 solver=solver,
                 config=config,
@@ -686,10 +413,17 @@ def main() -> None:
 
     directory_path = Path(f"./results/{dataset}_uni")
     directory_path.mkdir(parents=True, exist_ok=True)
-    filename = directory_path / "cfm_vrc_mppi.txt"
+    filename = directory_path / "cfm_cv_mppi_vrc_response.txt"
+    environment_response = (
+        "VRC-conditioned SFM"
+        if dataset == "sfm"
+        else "recorded trajectory (no online VRC response)"
+    )
     with open(filename, "w") as file:
         file.write("===== SIMULATION RESULTS =====\n\n")
         file.write(f"Date and Time: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        file.write("PLANNING_PEDESTRIAN_MODEL: constant_velocity\n")
+        file.write(f"ENVIRONMENT_PEDESTRIAN_RESPONSE: {environment_response}\n")
         file.write("===== HYPERPARAMETERS =====\n")
         file.write(f"SAFE_MARGIN: {SAFE_MARGIN}\n")
         file.write(f"SAFE_COEF: {SAFE_COEF}\n")

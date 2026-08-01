@@ -9,8 +9,13 @@ import time
 
 from cfm_mppi.mppi.flowmppi import FlowMPPI
 from cfm_mppi.mppi.utils import stage_cost, terminal_cost, doubleintegrator_dynamics
-from cfm_mppi.utils import AgentHistory, evaluate, HumanAgent
-from cfm_mppi.evaluation.eval_utils import synthesize_control, CFMConfig
+from cfm_mppi.utils import AgentHistory, HumanAgent
+from cfm_mppi.evaluation.eval_utils import (
+    CFMConfig,
+    compute_episode_metrics,
+    summarize_metrics,
+    synthesize_control,
+)
 import sys
 
 if len(sys.argv) > 1:
@@ -69,8 +74,7 @@ elif dataset == "sfm":
 
 
 all_average_times = []
-all_collisions = []
-all_distances = []
+episode_metrics = []
 
 state_trajectories = torch.zeros([batch_ego.shape[0], 4, horizon+1], dtype=torch.float32)
 control_trajectories = torch.zeros([batch_ego.shape[0], 2, horizon], dtype=torch.float32)
@@ -204,11 +208,15 @@ for idx in range(batch_ego.shape[0]):
         total_time += time_end - time_start
 
     average_time = total_time / horizon
-    collision, distance = evaluate(state_hist[:,1:], control_hist, pos_obs.squeeze(0).detach().cpu(), goal.squeeze(0).detach().cpu(), SAFE_MARGIN)
+    metrics = compute_episode_metrics(
+        states=state_hist[:, 1:],
+        obstacle_positions=pos_obs.squeeze(0).detach().cpu(),
+        goal=goal.squeeze(0).detach().cpu(),
+        collision_radius=SAFE_MARGIN,
+    )
 
     all_average_times.append(average_time)
-    all_collisions.append(collision)
-    all_distances.append(distance)
+    episode_metrics.append(metrics)
 
     state_trajectories[idx] = state_hist
     control_trajectories[idx] = control_hist
@@ -217,17 +225,14 @@ for idx in range(batch_ego.shape[0]):
 
 
 all_average_times = torch.tensor(all_average_times)
-all_collisions = torch.tensor(all_collisions).float()
-all_distances = torch.tensor(all_distances)
 
 mean_time = torch.mean(all_average_times)
 var_time = torch.var(all_average_times)
 
-collision_rate = torch.mean(all_collisions) * 100
-
-
-mean_distance = torch.mean(all_distances)
-var_distance = torch.var(all_distances)
+summary = summarize_metrics(episode_metrics)
+collision_rate = summary.collision_rate_percent
+mean_distance = summary.mean_final_goal_distance
+var_distance = summary.variance_final_goal_distance
 
 
 
@@ -253,7 +258,7 @@ with open(filename, 'w') as f:
     f.write(f"Collision Rate:\n : {collision_rate:.4f}\n\n")
     f.write(f"Distance:\n  Mean: {mean_distance:.4f}\n  Variance: {var_distance:.6f}\n\n")
     f.write("===== DETAILED RESULTS =====\n")
-    for i in range(all_collisions.shape[0]):
-        f.write(f"{i+1}\t{all_collisions[i]:.4f}\n")
+    for i, metrics in enumerate(episode_metrics):
+        f.write(f"{i+1}\t{metrics.collision:.4f}\n")
 
     

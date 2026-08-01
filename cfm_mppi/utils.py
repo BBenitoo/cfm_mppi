@@ -15,24 +15,6 @@ from cfm_mppi.vrc.build_vrc import (
     force_from_vrc_tube,
 )
 
-def evaluate(states, controls, pos_obs, goal, r):
-    """
-    Args:
-        states: [D, T]
-        controls: [D, T]
-        pos_obs: [N, D, T]
-        goal: [D]
-        r: float"""
-
-    distance = torch.norm(states[:2,:].unsqueeze(0)-pos_obs[:,:2,:], dim=1)
-    collision = torch.any(distance<r).int()
-    
-    distance = torch.norm(states[:2,-1] - goal)
-
-
-    return collision, distance
-
-
 @jax.jit
 def barrier(r_ab, v_rel, dt):
     dist = jnp.linalg.norm(r_ab)

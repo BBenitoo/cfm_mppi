@@ -9,8 +9,15 @@ import time
 
 from cfm_mppi.mppi.flowmppi import FlowMPPI
 from cfm_mppi.mppi.utils import stage_cost, terminal_cost, unicycle_dynamics
-from cfm_mppi.utils import AgentHistory, evaluate, HumanAgent
-from cfm_mppi.evaluation.eval_utils import synthesize_control, CFMConfig
+from cfm_mppi.utils import AgentHistory, HumanAgent
+from cfm_mppi.evaluation.eval_utils import (
+    CFMConfig,
+    compute_episode_metrics,
+    compute_freezing_metrics,
+    summarize_freezing_metrics,
+    summarize_metrics,
+    synthesize_control,
+)
 import sys
 
 if len(sys.argv) > 1:
@@ -40,6 +47,9 @@ D=0.1
 device = 'cuda'
 SCALE = 10
 dt = 0.1
+FREEZING_MINIMUM_DURATION = 1.0
+FREEZING_SPEED_THRESHOLD = 0.05
+FREEZING_GOAL_DISTANCE_THRESHOLD = 0.5
 n_sample = 200
 horizon = HORIZON
 noise_level = torch.tensor([0.8], device=device)
@@ -68,8 +78,8 @@ elif dataset == "sfm":
 
 
 all_average_times = []
-all_collisions = []
-all_distances = []
+episode_metrics = []
+freezing_metrics = []
 
 state_trajectories = torch.zeros([batch_ego.shape[0], 3, horizon+1], dtype=torch.float32)
 control_trajectories = torch.zeros([batch_ego.shape[0], 2, horizon], dtype=torch.float32)
@@ -203,11 +213,25 @@ for idx in range(batch_ego.shape[0]):
         total_time += time_end - time_start
 
     average_time = total_time / horizon
-    collision, distance = evaluate(state_hist[:,1:], control_hist, pos_obs.squeeze(0).detach().cpu(), goal.squeeze(0).detach().cpu(), SAFE_MARGIN)
+    metrics = compute_episode_metrics(
+        states=state_hist[:, 1:],
+        obstacle_positions=pos_obs.squeeze(0).detach().cpu(),
+        goal=goal.squeeze(0).detach().cpu(),
+        collision_radius=SAFE_MARGIN,
+    )
+    freezing = compute_freezing_metrics(
+        states=state_hist[:, :-1],
+        linear_speeds=control_hist[0],
+        goal=goal.squeeze(0).detach().cpu(),
+        dt=dt,
+        minimum_duration=FREEZING_MINIMUM_DURATION,
+        speed_threshold=FREEZING_SPEED_THRESHOLD,
+        goal_distance_threshold=FREEZING_GOAL_DISTANCE_THRESHOLD,
+    )
 
     all_average_times.append(average_time)
-    all_collisions.append(collision)
-    all_distances.append(distance)
+    episode_metrics.append(metrics)
+    freezing_metrics.append(freezing)
 
     state_trajectories[idx] = state_hist
     control_trajectories[idx] = control_hist
@@ -216,17 +240,15 @@ for idx in range(batch_ego.shape[0]):
 
 
 all_average_times = torch.tensor(all_average_times)
-all_collisions = torch.tensor(all_collisions).float()
-all_distances = torch.tensor(all_distances)
 
 mean_time = torch.mean(all_average_times)
 var_time = torch.var(all_average_times)
 
-collision_rate = torch.mean(all_collisions) * 100
-
-
-mean_distance = torch.mean(all_distances)
-var_distance = torch.var(all_distances)
+summary = summarize_metrics(episode_metrics)
+freezing_summary = summarize_freezing_metrics(freezing_metrics)
+collision_rate = summary.collision_rate_percent
+mean_distance = summary.mean_final_goal_distance
+var_distance = summary.variance_final_goal_distance
 
 
 directory_path = Path(f'./results/{dataset}_uni')
@@ -241,6 +263,12 @@ with open(filename, 'w') as f:
     f.write(f"SAFE_MARGIN: {SAFE_MARGIN}\n")
     f.write(f"SAFE_COEF: {SAFE_COEF}\n")
     f.write(f"GOAL_COEF: {GOAL_COEF}\n")
+    f.write(f"FREEZING_MINIMUM_DURATION: {FREEZING_MINIMUM_DURATION}\n")
+    f.write(f"FREEZING_SPEED_THRESHOLD: {FREEZING_SPEED_THRESHOLD}\n")
+    f.write(
+        "FREEZING_GOAL_DISTANCE_THRESHOLD: "
+        f"{FREEZING_GOAL_DISTANCE_THRESHOLD}\n"
+    )
     f.write(f"MPPI_SIGMA: {MPPI_SIGMA}\n")
     f.write(f"MPPI_LAMBDA: {MPPI_LAMBDA}\n")
     f.write(f"ODE_TIMES: {ODE_TIMES}\n")
@@ -249,9 +277,14 @@ with open(filename, 'w') as f:
     f.write("===== SUMMARY STATISTICS =====\n")
     f.write(f"Average Time:\n  Mean: {mean_time:.4f}\n  Variance: {var_time:.6f}\n\n")
     f.write(f"Collision Rate:\n : {collision_rate:.4f}\n\n")
+    f.write(
+        "Freezing Rate (episodes with at least one event):\n  "
+        f"{freezing_summary.freezing_rate_percent:.4f}\n"
+        f"Total Freezing Events:\n  {freezing_summary.total_event_count}\n\n"
+    )
     f.write(f"Distance:\n  Mean: {mean_distance:.4f}\n  Variance: {var_distance:.6f}\n\n")
     f.write("===== DETAILED RESULTS =====\n")
-    for i in range(all_collisions.shape[0]):
-        f.write(f"{i+1}\t{all_collisions[i]:.4f}\n")
+    for i, metrics in enumerate(episode_metrics):
+        f.write(f"{i+1}\t{metrics.collision:.4f}\n")
 
     

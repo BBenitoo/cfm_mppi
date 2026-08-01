@@ -1,7 +1,10 @@
-import torch
-from cfm_mppi.reward import single_cbf_reward_fn_pairwise, single_goal_reward_fn
+import math
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Sequence
+
+import torch
+
+from cfm_mppi.reward import single_cbf_reward_fn_pairwise, single_goal_reward_fn
 
 @dataclass
 class CFMConfig:
@@ -12,6 +15,191 @@ class CFMConfig:
     safe_margin_coefs: Optional[List[float]] = None
     goal_margin_coef: float = 0.1
     device: str = 'cuda'
+
+
+@dataclass(frozen=True)
+class EpisodeMetrics:
+    """Metrics computed from one completed evaluation episode."""
+
+    collision: torch.Tensor
+    final_goal_distance: torch.Tensor
+
+
+@dataclass(frozen=True)
+class EvaluationSummary:
+    """Aggregate non-timing metrics across evaluation episodes."""
+
+    collision_rate_percent: torch.Tensor
+    mean_final_goal_distance: torch.Tensor
+    variance_final_goal_distance: torch.Tensor
+
+
+@dataclass(frozen=True)
+class FreezingMetrics:
+    """Freezing events detected in one completed episode."""
+
+    event_count: torch.Tensor
+
+    @property
+    def occurred(self) -> torch.Tensor:
+        """Whether at least one freezing event occurred in the episode."""
+        return self.event_count > 0
+
+
+@dataclass(frozen=True)
+class FreezingSummary:
+    """Aggregate freezing metrics across evaluation episodes."""
+
+    freezing_rate_percent: torch.Tensor
+    total_event_count: torch.Tensor
+
+
+def compute_episode_metrics(
+    states: torch.Tensor,
+    obstacle_positions: torch.Tensor,
+    goal: torch.Tensor,
+    collision_radius: float,
+) -> EpisodeMetrics:
+    """Compute collision and final-goal-distance metrics for one episode.
+
+    Args:
+        states: Robot states with shape ``[state_dim, time]``.
+        obstacle_positions: Obstacle states with shape
+            ``[num_obstacles, obstacle_dim, time]``.
+        goal: Goal position with shape ``[goal_dim]``.
+        collision_radius: Strict center-distance collision threshold. A distance
+            exactly equal to this value is not counted as a collision.
+
+    Returns:
+        Scalar tensors on the same device as the inputs.
+    """
+    if states.ndim != 2 or states.shape[0] < 2 or states.shape[1] == 0:
+        raise ValueError(
+            "states must have shape [state_dim >= 2, time > 0]."
+        )
+    if obstacle_positions.ndim != 3 or obstacle_positions.shape[1] < 2:
+        raise ValueError(
+            "obstacle_positions must have shape "
+            "[num_obstacles, obstacle_dim >= 2, time]."
+        )
+    if obstacle_positions.shape[-1] != states.shape[-1]:
+        raise ValueError(
+            "states and obstacle_positions must have the same time dimension."
+        )
+    if goal.ndim != 1 or goal.numel() < 2:
+        raise ValueError("goal must have shape [goal_dim >= 2].")
+    if collision_radius < 0:
+        raise ValueError("collision_radius must be non-negative.")
+
+    obstacle_distances = torch.linalg.vector_norm(
+        states[:2].unsqueeze(0) - obstacle_positions[:, :2],
+        dim=1,
+    )
+    collision = torch.any(obstacle_distances < collision_radius)
+    final_goal_distance = torch.linalg.vector_norm(states[:2, -1] - goal[:2])
+    return EpisodeMetrics(
+        collision=collision,
+        final_goal_distance=final_goal_distance,
+    )
+
+
+def summarize_metrics(episodes: Sequence[EpisodeMetrics]) -> EvaluationSummary:
+    """Aggregate completed episode metrics using population variance."""
+    if not episodes:
+        raise ValueError("At least one episode is required to summarize metrics.")
+
+    collisions = torch.stack([episode.collision for episode in episodes]).float()
+    final_goal_distances = torch.stack(
+        [episode.final_goal_distance for episode in episodes]
+    )
+    return EvaluationSummary(
+        collision_rate_percent=collisions.mean() * 100.0,
+        mean_final_goal_distance=final_goal_distances.mean(),
+        variance_final_goal_distance=final_goal_distances.var(correction=0),
+    )
+
+
+def compute_freezing_metrics(
+    states: torch.Tensor,
+    linear_speeds: torch.Tensor,
+    goal: torch.Tensor,
+    dt: float,
+    minimum_duration: float = 1.0,
+    speed_threshold: float = 0.05,
+    goal_distance_threshold: float = 0.5,
+) -> FreezingMetrics:
+    """Count maximal continuous freezing intervals in one episode.
+
+    A freezing event is a maximal interval lasting at least
+    ``minimum_duration`` where the robot's absolute linear speed is strictly
+    below ``speed_threshold`` and its distance to the goal is strictly above
+    ``goal_distance_threshold``. Long intervals count once rather than once per
+    overlapping time window.
+
+    Args:
+        states: Robot states with shape ``[state_dim, time]``.
+        linear_speeds: Signed linear speeds in metres per second with shape
+            ``[time]``. The absolute value is used.
+        goal: Goal position with shape ``[goal_dim]``.
+        dt: Duration represented by each state/control sample in seconds.
+        minimum_duration: Minimum continuous low-speed duration in seconds.
+        speed_threshold: Strict low-speed threshold in metres per second.
+        goal_distance_threshold: Strict distance threshold in metres used to
+            exclude normal stopping at the goal.
+    """
+    if states.ndim != 2 or states.shape[0] < 2 or states.shape[1] == 0:
+        raise ValueError(
+            "states must have shape [state_dim >= 2, time > 0]."
+        )
+    if linear_speeds.ndim != 1:
+        raise ValueError("linear_speeds must have shape [time].")
+    if linear_speeds.shape[0] != states.shape[-1]:
+        raise ValueError("states and linear_speeds must have the same time dimension.")
+    if goal.ndim != 1 or goal.numel() < 2:
+        raise ValueError("goal must have shape [goal_dim >= 2].")
+    if dt <= 0:
+        raise ValueError("dt must be positive.")
+    if minimum_duration <= 0:
+        raise ValueError("minimum_duration must be positive.")
+    if speed_threshold < 0:
+        raise ValueError("speed_threshold must be non-negative.")
+    if goal_distance_threshold < 0:
+        raise ValueError("goal_distance_threshold must be non-negative.")
+
+    goal_distances = torch.linalg.vector_norm(
+        states[:2] - goal[:2].unsqueeze(-1),
+        dim=0,
+    )
+    freezing_samples = (linear_speeds.abs() < speed_threshold) & (
+        goal_distances > goal_distance_threshold
+    )
+
+    boundary = torch.zeros(1, dtype=torch.bool, device=freezing_samples.device)
+    padded_samples = torch.cat([boundary, freezing_samples, boundary])
+    transitions = padded_samples[1:].to(torch.int8) - padded_samples[:-1].to(
+        torch.int8
+    )
+    run_starts = torch.nonzero(transitions == 1, as_tuple=False).flatten()
+    run_ends = torch.nonzero(transitions == -1, as_tuple=False).flatten()
+    minimum_samples = math.ceil(minimum_duration / dt)
+    event_count = ((run_ends - run_starts) >= minimum_samples).sum()
+    return FreezingMetrics(event_count=event_count)
+
+
+def summarize_freezing_metrics(
+    episodes: Sequence[FreezingMetrics],
+) -> FreezingSummary:
+    """Return the percentage of episodes containing at least one freeze."""
+    if not episodes:
+        raise ValueError(
+            "At least one episode is required to summarize freezing metrics."
+        )
+
+    event_counts = torch.stack([episode.event_count for episode in episodes])
+    return FreezingSummary(
+        freezing_rate_percent=(event_counts > 0).float().mean() * 100.0,
+        total_event_count=event_counts.sum(),
+    )
 
 
 def run_CFM(model, config: CFMConfig, noisy_action_seq, noise_level, start_pos, goal_pos, obs_positions, obs_velocities, control_history=None):
