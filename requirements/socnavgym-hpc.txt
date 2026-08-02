@@ -1,0 +1,14 @@
+# Common Python-side dependencies for the pinned SocNavGym v1 probe.
+#
+# DGL and Python-RVO2 are intentionally not pinned here because their wheels or
+# builds must match the HPC node's Torch/CUDA/Python ABI.  Install those first,
+# then install the pinned SocNavGym source with --no-deps as documented in
+# docs/socnavgym_hpc_probe.md.
+gymnasium==0.29.1
+numpy==1.26.4
+Cython==0.29.36
+PyYAML>=6.0,<7
+opencv-python-headless>=4.8,<5
+matplotlib>=3.8,<4
+shapely>=2.0,<3
+

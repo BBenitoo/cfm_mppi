@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "selected": "v1-1ef13ee",
+  "candidates": {
+    "v1-1ef13ee": {
+      "commit": "1ef13ee604b71730e9ec7f2d9fd9cb2e8b796549",
+      "distribution_version": "0.1.0",
+      "env_id": "SocNavGym-v1",
+      "entry_point": "socnavgym.envs:SocNavEnv_v1",
+      "config": "configs/socnavgym/probe_v1_world.yaml",
+      "status": "probe",
+      "python_minor": "3.11",
+      "gymnasium_version": "0.29.1",
+      "numpy_version": "1.26.4",
+      "time_step": 0.1,
+      "human_count": 2,
+      "robot_type": "diff-drive",
+      "human_policy": "orca",
+      "set_shape": "no-walls",
+      "padded_observations": false,
+      "robot_world_dim": 16,
+      "human_world_stride": 14
+    },
+    "v2-95fbc9c": {
+      "commit": "95fbc9cebe4357201145a7d0a28c7736c0efe6cf",
+      "distribution_version": "0.2.0",
+      "env_id": "SocNavGym-v2",
+      "entry_point": "socnavgym.envs:SocNavEnv_v2",
+      "status": "rejected",
+      "python_minor": "3.11",
+      "gymnasium_version": "0.29.1",
+      "numpy_version": "1.26.4",
+      "reason": "At this revision WorldFrameObservations imports the deleted socnavenv_v1 module and still implements the incompatible v1 observation layout."
+    }
+  }
+}

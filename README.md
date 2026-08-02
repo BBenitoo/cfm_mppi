@@ -27,6 +27,13 @@ pip install -e .
 
 ## Usage
 
+### SocNavGym HPC contract probe
+
+SocNavGym remains an optional simulator dependency. Before integrating it with
+the planner, validate the pinned upstream revision, Python-RVO2, DGL, the Gym
+API, and `WorldFrameObservations` on the target HPC stack. See
+[`docs/socnavgym_hpc_probe.md`](docs/socnavgym_hpc_probe.md).
+
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:
 
