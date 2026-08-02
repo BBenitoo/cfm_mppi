@@ -69,9 +69,10 @@ planner diagnostics, environment metrics, geometric metrics, and synchronized
 planning latency. Use `--summary-only` to omit trajectories. Do not set
 `--max-steps` for a full episode.
 
-The current default config, `configs/socnavgym/probe_v1_world.yaml`, is the
-controlled two-ORCA-human integration scenario. A larger benchmark scenario
-suite can be added independently without changing the adapter or runner.
+The current default config, `configs/socnavgym/probe_v1_world.yaml`, remains the
+controlled two-ORCA-human integration scenario. The locked six-scenario formal
+benchmark, fixed seeds, H100 array entry point, and aggregation workflow are
+documented in [`socnavgym_benchmark.md`](socnavgym_benchmark.md).
 
 ## Verification
 

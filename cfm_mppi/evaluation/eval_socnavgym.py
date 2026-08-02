@@ -16,7 +16,10 @@ from typing import Any, Sequence
 
 import torch
 
-from cfm_mppi.evaluation.socnavgym_adapter import SocNavGymAdapter
+from cfm_mppi.evaluation.socnavgym_adapter import (
+    HUMAN_GOAL_REACHED_POLICY,
+    SocNavGymAdapter,
+)
 from cfm_mppi.evaluation.socnavgym_planners import (
     SocNavCFMMPPIPlanner,
     SocNavPlannerConfig,
@@ -141,6 +144,8 @@ def _implementation_sha256() -> str:
         REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "socnavgym_runner.py",
         REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "socnavgym_planners.py",
         REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "eval_socnavgym.py",
+        REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "socnavgym_benchmark.py",
+        REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "eval_socnavgym_suite.py",
         REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "eval_vrc.py",
         REPOSITORY_ROOT / "cfm_mppi" / "evaluation" / "eval_vrc_cv_prediction.py",
         REPOSITORY_ROOT / "cfm_mppi" / "mppi" / "flowmppi.py",
@@ -272,6 +277,7 @@ def _result_document(
         "gymnasium": _package_version("gymnasium"),
         "socnavgym": _package_version("socnavgym"),
         "socnavgym_commit": _distribution_commit("socnavgym"),
+        "socnavgym_human_goal_policy": HUMAN_GOAL_REACHED_POLICY,
         "numpy": _package_version("numpy"),
         "dgl": _package_version("dgl"),
         "pyrvo2": _package_version("pyrvo2"),
@@ -279,6 +285,7 @@ def _result_document(
         "implementation_sha256": _implementation_sha256(),
         "planner_config": asdict(planner_config),
         "planner_seed_offset": args.planner_seed_offset,
+        "execution_order_offset": getattr(args, "execution_order_offset", 0),
         **_git_metadata(),
     }
     return document
@@ -306,6 +313,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--planner", choices=("both", "cfm", "vrc"), default="both")
     parser.add_argument("--seeds", type=parse_seed_spec, default=parse_seed_spec("0"))
     parser.add_argument("--planner-seed-offset", type=int, default=0)
+    parser.add_argument("--execution-order-offset", type=int, choices=(0, 1), default=0)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
@@ -323,11 +331,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
-    args = build_argument_parser().parse_args(argv)
+def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run one configured evaluation and return its unwritten JSON document.
+
+    Keeping computation separate from output lets the locked benchmark suite
+    attach its job contract before publishing an immutable shard.
+    """
     config_path = Path(args.config).expanduser().resolve()
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
-    output_path = Path(args.output).expanduser().resolve()
     if not config_path.is_file():
         raise FileNotFoundError(f"SocNavGym config not found: {config_path}")
     device = _resolve_device(args.device)
@@ -355,6 +366,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         env_seeds=args.seeds,
         planner_seed_for_env=lambda env_seed: env_seed + args.planner_seed_offset,
         max_steps=args.max_steps,
+        execution_order_offset=getattr(args, "execution_order_offset", 0),
     )
     document = _result_document(
         paired_result,
@@ -363,6 +375,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         device=device,
         checkpoint_loaded=checkpoint_loaded,
     )
+    return document
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = build_argument_parser().parse_args(argv)
+    output_path = Path(args.output).expanduser().resolve()
+    document = run_evaluation(args)
     _write_json(output_path, document)
     print(json.dumps(document["summaries"], indent=2, sort_keys=True))
     print(f"wrote {output_path}")

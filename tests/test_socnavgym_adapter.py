@@ -9,8 +9,10 @@ import numpy as np
 
 from cfm_mppi.evaluation.socnavgym_adapter import (
     DEFAULT_ENV_ID,
+    HUMAN_GOAL_REACHED_POLICY,
     SocNavGymAdapter,
     SocNavGymAdapterError,
+    _install_geometric_human_goal_policy,
     make_socnavgym_env,
     physical_to_normalized_action,
 )
@@ -311,17 +313,56 @@ class SocNavGymAdapterTest(unittest.TestCase):
 
 
 class SocNavGymFactoryTest(unittest.TestCase):
+    def test_geometric_goal_policy_removes_wall_clock_dependency(self):
+        class Human:
+            def __init__(self, *, human_type="dynamic"):
+                self.width = 0.72
+                self.type = human_type
+                self.x = 0.0
+                self.y = 0.0
+                self.goal_x = 2.0
+                self.goal_y = 0.0
+                self.goal_radius = 0.25
+                self.initial_time = -1e12
+
+            def has_reached_goal(self, offset=None):
+                del offset
+                return True
+
+        module = SimpleNamespace(Human=Human)
+        _install_geometric_human_goal_policy(module)
+        installed = Human.has_reached_goal
+        _install_geometric_human_goal_policy(module)
+
+        self.assertIs(Human.has_reached_goal, installed)
+        self.assertEqual(
+            installed.__cfm_mppi_goal_policy__, HUMAN_GOAL_REACHED_POLICY
+        )
+        self.assertFalse(Human().has_reached_goal())
+        near = Human()
+        near.x = 1.5
+        self.assertTrue(near.has_reached_goal())
+        self.assertFalse(Human(human_type="static").has_reached_goal(offset=100.0))
+
     def test_factory_imports_optional_dependencies_only_when_called(self):
         base_env = SimpleNamespace(close=mock.Mock())
         wrapped_env = object()
         gymnasium = SimpleNamespace(make=mock.Mock(return_value=base_env))
         world_wrapper = mock.Mock(return_value=wrapped_env)
         wrappers = SimpleNamespace(WorldFrameObservations=world_wrapper)
+        human_module = SimpleNamespace(
+            Human=type(
+                "Human",
+                (),
+                {"has_reached_goal": lambda self, offset=None: False},
+            )
+        )
 
         def import_optional(name):
             return {
                 "gymnasium": gymnasium,
                 "socnavgym": SimpleNamespace(),
+                "socnavgym.envs.utils.human": human_module,
                 "socnavgym.wrappers": wrappers,
             }[name]
 
@@ -337,7 +378,12 @@ class SocNavGymFactoryTest(unittest.TestCase):
         self.assertIs(result, wrapped_env)
         self.assertEqual(
             [call.args[0] for call in importer.call_args_list],
-            ["gymnasium", "socnavgym", "socnavgym.wrappers"],
+            [
+                "gymnasium",
+                "socnavgym",
+                "socnavgym.envs.utils.human",
+                "socnavgym.wrappers",
+            ],
         )
         gymnasium.make.assert_called_once_with(
             DEFAULT_ENV_ID,
@@ -352,11 +398,19 @@ class SocNavGymFactoryTest(unittest.TestCase):
         wrappers = SimpleNamespace(
             WorldFrameObservations=mock.Mock(side_effect=RuntimeError("broken"))
         )
+        human_module = SimpleNamespace(
+            Human=type(
+                "Human",
+                (),
+                {"has_reached_goal": lambda self, offset=None: False},
+            )
+        )
 
         def import_optional(name):
             return {
                 "gymnasium": gymnasium,
                 "socnavgym": SimpleNamespace(),
+                "socnavgym.envs.utils.human": human_module,
                 "socnavgym.wrappers": wrappers,
             }[name]
 

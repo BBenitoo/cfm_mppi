@@ -26,10 +26,48 @@ import numpy as np
 DEFAULT_ENV_ID = "SocNavGym-v1"
 ROBOT_OBSERVATION_DIM = 16
 HUMAN_OBSERVATION_STRIDE = 14
+HUMAN_GOAL_REACHED_POLICY = "geometric-only-v1"
 
 
 class SocNavGymAdapterError(RuntimeError):
     """The environment does not satisfy the adapter's v1 contract."""
+
+
+def _install_geometric_human_goal_policy(human_module: Any) -> None:
+    """Remove SocNavGym's planner-speed-dependent wall-clock fallback.
+
+    Upstream SocNavGym v1 declares a moving human to have reached its goal
+    either geometrically *or* after 15 seconds of real wall-clock time.  A
+    computationally slower planner would therefore cause pedestrians to pick
+    new goals earlier despite receiving the same environment seed.  Formal
+    matched evaluation uses the physical geometric condition only.
+    """
+    human_class = getattr(human_module, "Human", None)
+    if human_class is None:
+        raise SocNavGymAdapterError("SocNavGym human module has no Human class")
+    current = getattr(human_class, "has_reached_goal", None)
+    if not callable(current):
+        raise SocNavGymAdapterError("SocNavGym Human has no has_reached_goal method")
+    if (
+        getattr(current, "__cfm_mppi_goal_policy__", None)
+        == HUMAN_GOAL_REACHED_POLICY
+    ):
+        return
+
+    def geometric_has_reached_goal(self, offset=None):
+        if offset is None:
+            offset = self.width / 2
+        if self.type == "static":
+            return False
+        distance_to_goal = np.sqrt(
+            (self.x - self.goal_x) ** 2 + (self.y - self.goal_y) ** 2
+        )
+        return bool(distance_to_goal < (offset + self.goal_radius))
+
+    geometric_has_reached_goal.__cfm_mppi_goal_policy__ = (  # type: ignore[attr-defined]
+        HUMAN_GOAL_REACHED_POLICY
+    )
+    human_class.has_reached_goal = geometric_has_reached_goal
 
 
 def _readonly_float_vector(
@@ -282,6 +320,8 @@ def make_socnavgym_env(
         # Importing the package performs its Gymnasium environment
         # registration before gymnasium.make is called.
         importlib.import_module("socnavgym")
+        human_module = importlib.import_module("socnavgym.envs.utils.human")
+        _install_geometric_human_goal_policy(human_module)
         wrappers = importlib.import_module("socnavgym.wrappers")
         wrapper_class = getattr(wrappers, "WorldFrameObservations")
     except (ImportError, AttributeError) as exc:
@@ -523,6 +563,7 @@ class SocNavGymAdapter:
     ) -> None:
         if env is not None and config_path is not None:
             raise ValueError("pass either config_path or env, not both")
+        created_from_config = env is None
         if env is None:
             if config_path is None:
                 raise ValueError("config_path is required when env is not supplied")
@@ -533,6 +574,22 @@ class SocNavGymAdapter:
         self._episode_done = False
         self._state: SocNavState | None = None
         self._human_ids: tuple[int, ...] | None = None
+        self._requires_geometric_goal_policy = created_from_config
+
+    def _assert_geometric_goal_policy(self) -> None:
+        if not self._requires_geometric_goal_policy:
+            return
+        for human in _human_objects_in_observation_order(self.unwrapped):
+            method = getattr(human, "has_reached_goal", None)
+            function = getattr(method, "__func__", method)
+            if (
+                getattr(function, "__cfm_mppi_goal_policy__", None)
+                != HUMAN_GOAL_REACHED_POLICY
+            ):
+                raise SocNavGymAdapterError(
+                    "SocNavGym Human.has_reached_goal no longer uses the locked "
+                    f"{HUMAN_GOAL_REACHED_POLICY} policy"
+                )
 
     @property
     def env(self) -> Any:
@@ -657,6 +714,7 @@ class SocNavGymAdapter:
             result = self._env.reset(seed=seed)
         else:
             result = self._env.reset(seed=seed, options=dict(options))
+        self._assert_geometric_goal_policy()
         if not isinstance(result, tuple) or len(result) != 2:
             raise SocNavGymAdapterError(
                 "reset() must return (observation, info)"
@@ -675,6 +733,7 @@ class SocNavGymAdapter:
         control: Sequence[float] | np.ndarray,
     ) -> SocNavStep:
         self._assert_open()
+        self._assert_geometric_goal_policy()
         if self._state is None or self._human_ids is None:
             raise RuntimeError("reset() must be called before step()")
         if self._episode_done:
@@ -751,6 +810,7 @@ class SocNavGymAdapter:
 __all__ = [
     "DEFAULT_ENV_ID",
     "HUMAN_OBSERVATION_STRIDE",
+    "HUMAN_GOAL_REACHED_POLICY",
     "ROBOT_OBSERVATION_DIM",
     "HumanState",
     "SocNavGymAdapter",

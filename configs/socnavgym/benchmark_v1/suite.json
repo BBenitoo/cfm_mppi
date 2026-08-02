@@ -1,0 +1,92 @@
+{
+  "schema_version": 1,
+  "suite_id": "socnavgym-v1-crowd-density-v1",
+  "description": "Locked 3x2 crowd-density and pedestrian-policy benchmark for matched CFM+MPPI versus VRC+MPPI evaluation.",
+  "locked": true,
+  "environment_id": "SocNavGym-v1",
+  "observation_wrapper": "WorldFrameObservations",
+  "socnavgym_commit": "1ef13ee604b71730e9ec7f2d9fd9cb2e8b796549",
+  "human_goal_reached_policy": "geometric-only-v1",
+  "seed_file": "seeds.json",
+  "seed_file_sha256": "b2e1ae45de01e61c02d1bbad739c5868f666451967cf2c40a05dd868d85f6185",
+  "checkpoint_sha256": "9d92ebc6ae274098514398053d1a4afa91032f48f03026bfd5b63175e8ee53ae",
+  "rvo2_module_sha256": "07975350aae97e876636ae62e1564d5b76cd788b5945d17d4b3a711e3b99391d",
+  "dgl_backend": "pytorch",
+  "device": "cuda",
+  "cuda_device_contains": "H100",
+  "planner_seed_offset": 1000000,
+  "seeds_per_job": 1,
+  "expected_jobs": 180,
+  "expected_scenario_seed_pairs": 180,
+  "output_subdirectory": "socnavgym/benchmark_v1",
+  "planner": {
+    "selection": "both",
+    "horizon": 80,
+    "max_history": 10,
+    "cfm_candidates": 200,
+    "branches": 10,
+    "mppi_samples_per_branch": 200
+  },
+  "scenarios": [
+    {
+      "id": "orca_sparse_2",
+      "role": "primary",
+      "config": "orca_sparse_2.yaml",
+      "config_sha256": "f6c41b5e72f26f880434d2593c6a17ee7f8218066dacd73b44ad283d4e8d9c4f",
+      "human_policy": "orca",
+      "dynamic_humans": 2,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "orca_medium_5",
+      "role": "primary",
+      "config": "orca_medium_5.yaml",
+      "config_sha256": "d3ccb49e5f017b0696990cbe77bafe73a55194d6354ed397b36d11587d644315",
+      "human_policy": "orca",
+      "dynamic_humans": 5,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "orca_dense_8",
+      "role": "primary",
+      "config": "orca_dense_8.yaml",
+      "config_sha256": "0ada8d1ee119b6c7767edbea19754c52e6de494da1f74fd5ab9580ac7dd45e6e",
+      "human_policy": "orca",
+      "dynamic_humans": 8,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "sfm_sparse_2",
+      "role": "sensitivity",
+      "config": "sfm_sparse_2.yaml",
+      "config_sha256": "c4b589db24b8ae8e99391a01b2a0e6bc08d6b744c6d5217b6e4f2d6a14b28b35",
+      "human_policy": "sfm",
+      "dynamic_humans": 2,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "sfm_medium_5",
+      "role": "sensitivity",
+      "config": "sfm_medium_5.yaml",
+      "config_sha256": "f985c13955eef0ff583828880c90fd123f747b711e8f2d6e636c999cdbab3a1c",
+      "human_policy": "sfm",
+      "dynamic_humans": 5,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "sfm_dense_8",
+      "role": "sensitivity",
+      "config": "sfm_dense_8.yaml",
+      "config_sha256": "fcb8aceda954abadbdc9c32b9d66eb2af98fe5575e0c412058dfb74111351ea2",
+      "human_policy": "sfm",
+      "dynamic_humans": 8,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    }
+  ]
+}

@@ -37,7 +37,9 @@ API, and `WorldFrameObservations` on the target HPC stack. See
 The matched CFM+MPPI versus VRC+MPPI closed-loop runner is documented in
 [`docs/socnavgym_evaluation.md`](docs/socnavgym_evaluation.md). It creates a
 fresh SocNavGym environment for every method/seed pair and keeps VRC strictly
-inside the planner.
+inside the planner. The locked 6-scenario x 30-seed H100 benchmark and exact
+experiment commands are in
+[`docs/socnavgym_benchmark.md`](docs/socnavgym_benchmark.md).
 
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:

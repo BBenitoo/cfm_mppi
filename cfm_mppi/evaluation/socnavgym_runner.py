@@ -503,6 +503,7 @@ def run_paired_socnavgym_evaluation(
     env_seeds: Sequence[int],
     planner_seed_for_env: Callable[[int], int] | None = None,
     max_steps: int | None = None,
+    execution_order_offset: int = 0,
 ) -> PairedEvaluationResult:
     """Run fresh, matched environments for every ``(planner, env_seed)`` pair."""
     if not planner_factories:
@@ -527,6 +528,11 @@ def run_paired_socnavgym_evaluation(
         raise ValueError("at least one environment seed is required")
     if len(set(seeds)) != len(seeds):
         raise ValueError("environment seeds must be unique")
+    if isinstance(execution_order_offset, (bool, np.bool_)) or not isinstance(
+        execution_order_offset, (int, np.integer)
+    ):
+        raise TypeError("execution_order_offset must be an integer")
+    order_offset = int(execution_order_offset)
 
     episodes_by_key: dict[tuple[int, str], EpisodeResult] = {}
     execution_orders: list[tuple[str, ...]] = []
@@ -562,7 +568,9 @@ def run_paired_socnavgym_evaluation(
             )
 
         execution_order = (
-            planner_names if seed_index % 2 == 0 else tuple(reversed(planner_names))
+            planner_names
+            if (order_offset + seed_index) % 2 == 0
+            else tuple(reversed(planner_names))
         )
         execution_orders.append(execution_order)
         reference: EpisodeResult | None = None

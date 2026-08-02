@@ -411,6 +411,7 @@ class PairedSocNavGymEvaluationTest(unittest.TestCase):
             },
             env_seeds=[3, 5],
             planner_seed_for_env=lambda seed: seed + 100,
+            execution_order_offset=1,
         )
 
         self.assertEqual(len(environments), 4)
@@ -420,7 +421,7 @@ class PairedSocNavGymEvaluationTest(unittest.TestCase):
         self.assertEqual(result.env_seeds, (3, 5))
         self.assertEqual(
             result.execution_orders,
-            (("first", "second"), ("second", "first")),
+            (("second", "first"), ("first", "second")),
         )
         self.assertEqual(
             tuple(episode.planner_name for episode in result.episodes),
