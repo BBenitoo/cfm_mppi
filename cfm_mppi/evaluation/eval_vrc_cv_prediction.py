@@ -82,6 +82,7 @@ def plan_with_constant_velocity_prediction(
     planning_horizon: int,
     histories: dict[str, AgentHistory],
     num_branches: int = N_BRANCHES,
+    look_ahead_distance: float = LOOK_AHEAD_DISTANCE,
     vrc_params: VRCParameters = VRC_PARAMS,
     build_selected_vrc_tube: bool = True,
 ) -> BranchPlan:
@@ -120,7 +121,7 @@ def plan_with_constant_velocity_prediction(
             obstacle_prediction=constant_velocity_obstacles,
             num_branches=num_branches,
             radius=config.agent_radius,
-            look_ahead_distance=LOOK_AHEAD_DISTANCE,
+            look_ahead_distance=look_ahead_distance,
         )
 
         # Every robot branch sees the same CV pedestrian future.  Keeping the

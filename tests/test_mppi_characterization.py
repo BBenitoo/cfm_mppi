@@ -64,7 +64,46 @@ def _make_solver(stage_cost, *, num_samples: int = 4) -> FlowMPPI:
 
 
 class MPPICharacterizationTest(unittest.TestCase):
-    def test_score_pairs_first_future_obstacle_with_initial_state(self) -> None:
+    def test_forward_sizes_previous_reference_at_fixed_horizon(self) -> None:
+        def zero_stage(
+            state,
+            action,
+            goal,
+            obstacle,
+            radius,
+            time,
+            prev_action,
+        ):
+            del action, goal, obstacle, radius, time, prev_action
+            return torch.sum(state[:, :2] * 0.0, dim=1)
+
+        solver = _make_solver(zero_stage, num_samples=10)
+        controls = torch.zeros((10, 2, 2), dtype=torch.float64)
+        obstacles = torch.zeros((1, 2, 2), dtype=torch.float64)
+        state = torch.zeros((1, 2), dtype=torch.float64)
+        goal = torch.zeros((1, 2), dtype=torch.float64)
+
+        first_controls, _ = solver.forward(
+            state,
+            controls,
+            horizon=2,
+            goal=goal,
+            obstacle_state=obstacles,
+            rad=0.5,
+        )
+        second_controls, _ = solver.forward(
+            state,
+            controls,
+            horizon=2,
+            goal=goal,
+            obstacle_state=obstacles,
+            rad=0.5,
+        )
+
+        self.assertEqual(first_controls.shape, (2, 2))
+        self.assertEqual(second_controls.shape, (2, 2))
+
+    def test_score_pairs_future_obstacles_with_future_robot_states(self) -> None:
         def squared_distance_stage(
             state,
             action,
@@ -96,9 +135,8 @@ class MPPICharacterizationTest(unittest.TestCase):
             rad=0.5,
         )
 
-        # Legacy contract: p[t+1:t+H] is paired with x[t:t+H-1].
-        # A future synchronized-time change must update this test explicitly.
-        torch.testing.assert_close(cost, torch.tensor([5.0], dtype=torch.float64))
+        # The predictions p[t+1:t+H] are compared with x[t+1:t+H].
+        torch.testing.assert_close(cost, torch.tensor([13.0], dtype=torch.float64))
 
     def test_changing_one_branch_obstacles_does_not_change_other_branch(self) -> None:
         def obstacle_distance_stage(

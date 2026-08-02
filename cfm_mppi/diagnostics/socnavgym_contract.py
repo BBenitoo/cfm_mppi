@@ -468,10 +468,23 @@ def _zero_action(env: Any) -> np.ndarray:
         raise ContractViolation(
             f"Expected float32 action space, got {action_space.dtype}"
         )
-    if not np.array_equal(action_space.low, np.full(3, -1.0, dtype=np.float32)):
-        raise ContractViolation("Expected normalized action lower bounds [-1, -1, -1]")
-    if not np.array_equal(action_space.high, np.full(3, 1.0, dtype=np.float32)):
-        raise ContractViolation("Expected normalized action upper bounds [1, 1, 1]")
+    robot_type = getattr(getattr(env.unwrapped, "robot", None), "type", None)
+    if robot_type == "diff-drive":
+        expected_low = np.asarray([-1.0, 0.0, -1.0], dtype=np.float32)
+        expected_high = np.asarray([1.0, 0.0, 1.0], dtype=np.float32)
+    elif robot_type == "holonomic":
+        expected_low = np.full(3, -1.0, dtype=np.float32)
+        expected_high = np.full(3, 1.0, dtype=np.float32)
+    else:
+        raise ContractViolation(f"Unsupported robot action contract: {robot_type!r}")
+    if not np.array_equal(action_space.low, expected_low):
+        raise ContractViolation(
+            f"Expected normalized action lower bounds {expected_low.tolist()}"
+        )
+    if not np.array_equal(action_space.high, expected_high):
+        raise ContractViolation(
+            f"Expected normalized action upper bounds {expected_high.tolist()}"
+        )
     action = np.zeros(3, dtype=np.float32)
     if not action_space.contains(action):
         raise ContractViolation("Float32 zero action is not in the action space")

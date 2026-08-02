@@ -54,3 +54,4 @@ MANIFEST
 *.err
 
 .Ds_Store
+*.slurm

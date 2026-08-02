@@ -13,6 +13,7 @@ from cfm_mppi.diagnostics.socnavgym_contract import (
     ContractViolation,
     DEFAULT_MANIFEST,
     EXIT_INTERNAL,
+    _zero_action,
     extract_direct_url_commit,
     load_candidate,
     main,
@@ -21,6 +22,28 @@ from cfm_mppi.diagnostics.socnavgym_contract import (
 
 
 class SocNavGymProbeHelperTest(unittest.TestCase):
+    def test_zero_action_accepts_diff_drive_lateral_axis_contract(self) -> None:
+        action_space = SimpleNamespace(
+            shape=(3,),
+            dtype=np.dtype(np.float32),
+            low=np.asarray([-1.0, 0.0, -1.0], dtype=np.float32),
+            high=np.asarray([1.0, 0.0, 1.0], dtype=np.float32),
+            contains=lambda action: (
+                action.dtype == np.float32
+                and action.shape == (3,)
+                and np.all(action >= np.asarray([-1.0, 0.0, -1.0]))
+                and np.all(action <= np.asarray([1.0, 0.0, 1.0]))
+            ),
+        )
+        env = SimpleNamespace(
+            action_space=action_space,
+            unwrapped=SimpleNamespace(robot=SimpleNamespace(type="diff-drive")),
+        )
+
+        action = _zero_action(env)
+
+        np.testing.assert_array_equal(action, np.zeros(3, dtype=np.float32))
+
     def test_selected_candidate_is_pinned_v1_world_contract(self) -> None:
         candidate = load_candidate(DEFAULT_MANIFEST)
 

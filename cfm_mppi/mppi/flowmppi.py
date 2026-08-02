@@ -214,7 +214,9 @@ class FlowMPPI(nn.Module):
             out_dims=1,
         )
         stage_costs = vectorized_cost(
-            states[:, :-1, :],
+            # Obstacle forecasts begin at t+1, so compare them with the robot
+            # state reached by the same control, not the pre-control state.
+            states[:, 1:, :],
             controls,
             obstacle_state,
             prev_actions,
@@ -313,11 +315,10 @@ class FlowMPPI(nn.Module):
                 rad,
             )
 
-        previous_reference = None
-        if self.prev_optimal_action_seq is not None:
-            shifted_previous = self.prev_optimal_action_seq[1:]
-            if shifted_previous.shape == branch_controls.shape[1:]:
-                previous_reference = shifted_previous
+        previous_reference = self._shifted_previous_reference(
+            horizon=branch_controls.shape[1],
+            dim_control=branch_controls.shape[2],
+        )
         if previous_reference is not None:
             sampled_costs += 0.1 * torch.sum(
                 (
@@ -433,9 +434,14 @@ class FlowMPPI(nn.Module):
             torch.sum(stage_costs, dim=1)
             + terminal_costs
         )
-        if self.prev_optimal_action_seq is not None:
+        previous_reference = self._shifted_previous_reference(
+            horizon=controls_dyn.shape[1],
+            dim_control=controls_dyn.shape[2],
+        )
+        if previous_reference is not None:
             costs += 0.1 * torch.sum(
-                (self.prev_optimal_action_seq.unsqueeze(0)[:,1:,:] - controls_dyn) ** 2, dim=(1, 2)
+                (previous_reference.unsqueeze(0) - controls_dyn) ** 2,
+                dim=(1, 2),
             )
 
         n_elite = 10
@@ -543,6 +549,28 @@ class FlowMPPI(nn.Module):
         self.prev_optimal_action_seq = optimal_action_seq
 
         return optimal_action_seq, mean_action_seq_sin
+
+    def _shifted_previous_reference(
+        self,
+        *,
+        horizon: int,
+        dim_control: int,
+    ) -> torch.Tensor | None:
+        """Shift and size a previous solution for fixed/receding horizons."""
+        previous = self.prev_optimal_action_seq
+        if (
+            previous is None
+            or previous.ndim != 2
+            or previous.shape[0] == 0
+            or previous.shape[1] != dim_control
+            or horizon <= 0
+        ):
+            return None
+        shifted = previous[1:]
+        if shifted.shape[0] >= horizon:
+            return shifted[:horizon]
+        padding = previous[-1:].expand(horizon - shifted.shape[0], -1)
+        return torch.cat([shifted, padding], dim=0)
 
 
     def get_top_samples(self, num_samples: int) -> Tuple[torch.Tensor, torch.Tensor]:

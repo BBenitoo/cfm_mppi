@@ -316,6 +316,7 @@ def plan_vrc_branches(
     planning_horizon: int,
     histories: dict[str, AgentHistory],
     num_branches: int = N_BRANCHES,
+    look_ahead_distance: float = LOOK_AHEAD_DISTANCE,
     vrc_params: VRCParameters = VRC_PARAMS,
     force_params: RobotForceParameters = ROBOT_FORCE_PARAMS,
     prediction_params: PedestrianPredictionParameters | None = None,
@@ -355,7 +356,7 @@ def plan_vrc_branches(
             obstacle_prediction=constant_velocity_obstacles,
             num_branches=num_branches,
             radius=config.agent_radius,
-            look_ahead_distance=LOOK_AHEAD_DISTANCE,
+            look_ahead_distance=look_ahead_distance,
         )
 
     with torch.no_grad():

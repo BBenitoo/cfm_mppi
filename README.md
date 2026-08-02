@@ -34,6 +34,11 @@ the planner, validate the pinned upstream revision, Python-RVO2, DGL, the Gym
 API, and `WorldFrameObservations` on the target HPC stack. See
 [`docs/socnavgym_hpc_probe.md`](docs/socnavgym_hpc_probe.md).
 
+The matched CFM+MPPI versus VRC+MPPI closed-loop runner is documented in
+[`docs/socnavgym_evaluation.md`](docs/socnavgym_evaluation.md). It creates a
+fresh SocNavGym environment for every method/seed pair and keeps VRC strictly
+inside the planner.
+
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:
 
