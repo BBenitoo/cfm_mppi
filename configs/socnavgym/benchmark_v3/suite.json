@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "suite_id": "socnavgym-v1-fixed-10-v3",
+  "description": "Locked two-policy benchmark with 10 dynamic humans and 300 seeds for matched CFM+MPPI versus VRC+MPPI evaluation.",
+  "locked": true,
+  "environment_id": "SocNavGym-v1",
+  "observation_wrapper": "WorldFrameObservations",
+  "socnavgym_commit": "1ef13ee604b71730e9ec7f2d9fd9cb2e8b796549",
+  "human_goal_reached_policy": "geometric-only-v1",
+  "seed_file": "seeds.json",
+  "seed_file_sha256": "79bc175d3f112953d4c49a01541dec20e80f72fe77312d17c5714203b0a36314",
+  "checkpoint_sha256": "9d92ebc6ae274098514398053d1a4afa91032f48f03026bfd5b63175e8ee53ae",
+  "rvo2_module_sha256": "07975350aae97e876636ae62e1564d5b76cd788b5945d17d4b3a711e3b99391d",
+  "dgl_backend": "pytorch",
+  "device": "cuda",
+  "cuda_device_contains": "H100",
+  "planner_seed_offset": 1000000,
+  "seeds_per_job": 1,
+  "expected_jobs": 600,
+  "expected_scenario_seed_pairs": 600,
+  "output_subdirectory": "socnavgym/benchmark_v3",
+  "planner": {
+    "selection": "both",
+    "horizon": 80,
+    "max_history": 10,
+    "cfm_candidates": 200,
+    "branches": 10,
+    "mppi_samples_per_branch": 200
+  },
+  "scenarios": [
+    {
+      "id": "orca_fixed_10",
+      "role": "primary",
+      "config": "orca_fixed_10.yaml",
+      "config_sha256": "4dc5ad4791217d9dd70d9029764127cbc99384e1f94bd6cc8f58a07ed4b01823",
+      "human_policy": "orca",
+      "dynamic_humans": 10,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    },
+    {
+      "id": "sfm_fixed_10",
+      "role": "sensitivity",
+      "config": "sfm_fixed_10.yaml",
+      "config_sha256": "e4de598e1878b13830fe971d9b2c9e3a0b749383cbaa0def63e52489444a5f88",
+      "human_policy": "sfm",
+      "dynamic_humans": 10,
+      "static_humans": 0,
+      "map_size_metres": [10, 10]
+    }
+  ]
+}
