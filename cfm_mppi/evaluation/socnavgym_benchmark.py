@@ -45,6 +45,8 @@ class BenchmarkScenario:
     dynamic_humans: int
     static_humans: int
     map_size_metres: tuple[int, int]
+    robot_start: tuple[float, float] | None
+    robot_goal: tuple[float, float] | None
 
 
 @dataclass(frozen=True)
@@ -333,7 +335,7 @@ def load_benchmark_suite(
 
 def benchmark_metadata(suite: BenchmarkSuite, job: BenchmarkJob) -> dict[str, Any]:
     """Build immutable experiment-identifying metadata for one shard."""
-    return {
+    metadata = {
         "schema_version": "cfm_mppi.socnavgym_benchmark_shard.v1",
         "suite_id": suite.suite_id,
         "manifest": str(suite.manifest_path),
@@ -363,6 +365,10 @@ def benchmark_metadata(suite: BenchmarkSuite, job: BenchmarkJob) -> dict[str, An
         "device": suite.device,
         "cuda_device_contains": suite.cuda_device_contains,
     }
+    if job.scenario.robot_start is not None:
+        metadata["robot_start"] = list(job.scenario.robot_start)
+        metadata["robot_goal"] = list(job.scenario.robot_goal)
+    return metadata
 
 
 def validate_shard_document(
@@ -488,6 +494,8 @@ def validate_shard_document(
             expected_human_count=(
                 job.scenario.dynamic_humans + job.scenario.static_humans
             ),
+            expected_robot_start=job.scenario.robot_start,
+            expected_robot_goal=job.scenario.robot_goal,
         )
 
     for seed_offset in range(len(job.env_seeds)):
@@ -505,7 +513,11 @@ def _validate_episode_summary(
     *,
     require_full_steps: bool,
     expected_human_count: int,
+    expected_robot_start: tuple[float, float] | None,
+    expected_robot_goal: tuple[float, float] | None,
 ) -> None:
+    import numpy as np
+
     expected_episode_keys = {
         "planner",
         "budget",
@@ -653,6 +665,24 @@ def _validate_episode_summary(
         raise BenchmarkContractError("formal episode is missing its initial state")
     if not isinstance(episode.get("reset_info"), Mapping):
         raise BenchmarkContractError("formal episode is missing reset info")
+    initial_state = _state_from_document(
+        episode["initial_state"], "episode initial_state"
+    )
+    if len(initial_state.humans) != expected_human_count:
+        raise BenchmarkContractError(
+            "formal episode human count differs from its scenario"
+        )
+    if expected_robot_start is not None:
+        expected_start = np.asarray(expected_robot_start, dtype=np.float32)
+        expected_goal = np.asarray(expected_robot_goal, dtype=np.float32)
+        if not np.array_equal(initial_state.robot_position, expected_start):
+            raise BenchmarkContractError(
+                "formal episode robot start differs from its scenario"
+            )
+        if not np.array_equal(initial_state.goal, expected_goal):
+            raise BenchmarkContractError(
+                "formal episode robot goal differs from its scenario"
+            )
     if not require_full_steps:
         return
     steps = episode.get("steps")
@@ -1062,7 +1092,12 @@ def _load_scenario(
             "dynamic_humans",
             "static_humans",
             "map_size_metres",
-        },
+        }
+        | (
+            {"robot_start", "robot_goal"}
+            if "robot_start" in raw or "robot_goal" in raw
+            else set()
+        ),
         label,
     )
     scenario_id = _nonempty_string(raw["id"], f"{label}.id")
@@ -1086,6 +1121,27 @@ def _load_scenario(
     map_size = tuple(
         _positive_int(value, f"{label}.map_size_metres") for value in raw_map
     )
+    robot_start: tuple[float, float] | None = None
+    robot_goal: tuple[float, float] | None = None
+    if "robot_start" in raw or "robot_goal" in raw:
+        if "robot_start" not in raw or "robot_goal" not in raw:
+            raise BenchmarkContractError(
+                f"{label} must define robot_start and robot_goal together"
+            )
+        robot_start = _finite_coordinate_pair(
+            raw["robot_start"], f"{label}.robot_start"
+        )
+        robot_goal = _finite_coordinate_pair(raw["robot_goal"], f"{label}.robot_goal")
+        limits = (map_size[0] / 2.0 - 0.5, map_size[1] / 2.0 - 0.5)
+        for field, point in (("robot_start", robot_start), ("robot_goal", robot_goal)):
+            if abs(point[0]) > limits[0] or abs(point[1]) > limits[1]:
+                raise BenchmarkContractError(
+                    f"{label}.{field} must lie inside the map's 0.5 m spawn margin"
+                )
+        if robot_start == robot_goal:
+            raise BenchmarkContractError(
+                f"{label}.robot_start and robot_goal must differ"
+            )
     config_path = _resolve_relative_file(base, raw["config"], f"{label}.config")
     declared_sha = _declared_sha256(raw["config_sha256"], f"{label}.config_sha256")
     actual_sha = sha256_file(config_path)
@@ -1111,6 +1167,8 @@ def _load_scenario(
         dynamic_humans=dynamic_humans,
         static_humans=static_humans,
         map_size_metres=(map_size[0], map_size[1]),
+        robot_start=robot_start,
+        robot_goal=robot_goal,
     )
 
 
@@ -1138,6 +1196,7 @@ def _validate_socnavgym_config(
         ("env", "max_advance_human"): 0.8,
         ("env", "max_advance_robot"): 1.0,
         ("env", "max_rotation"): 1.0,
+        ("env", "margin"): 0.5,
         ("env", "min_static_humans"): static_humans,
         ("env", "max_static_humans"): static_humans,
         ("env", "min_dynamic_humans"): dynamic_humans,
@@ -1210,6 +1269,16 @@ def _planner_contract(raw: Any) -> dict[str, int | str]:
     for key in keys - {"selection"}:
         result[key] = _positive_int(raw[key], f"planner.{key}")
     return result
+
+
+def _finite_coordinate_pair(value: Any, label: str) -> tuple[float, float]:
+    if (
+        not isinstance(value, list)
+        or len(value) != 2
+        or any(not _is_finite_number(component) for component in value)
+    ):
+        raise BenchmarkContractError(f"{label} must be a finite [x, y] list")
+    return (float(value[0]), float(value[1]))
 
 
 def _read_json_mapping(path: Path, label: str) -> dict[str, Any]:

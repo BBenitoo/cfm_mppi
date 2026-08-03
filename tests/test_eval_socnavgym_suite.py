@@ -28,6 +28,12 @@ from cfm_mppi.evaluation.socnavgym_runner import (
 )
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+BENCHMARK_V4_SUITE = (
+    REPOSITORY_ROOT / "configs" / "socnavgym" / "benchmark_v4" / "suite.json"
+)
+
+
 def _fake_state(human_count, *, robot_x):
     humans = tuple(
         HumanState(
@@ -201,6 +207,12 @@ class SocNavGymSuiteTest(unittest.TestCase):
     def test_accepts_a_complete_locked_shard(self):
         job = self.suite.job(0)
         validate_shard_document(_fake_shard(self.suite, job), self.suite, job)
+
+    def test_v4_rejects_a_shard_without_its_fixed_robot_route(self):
+        suite = load_benchmark_suite(BENCHMARK_V4_SUITE)
+        job = suite.job(0)
+        with self.assertRaisesRegex(BenchmarkContractError, "robot start"):
+            validate_shard_document(_fake_shard(suite, job), suite, job)
 
     def test_rejects_smoke_and_execution_order_drift(self):
         job = self.suite.job(0)

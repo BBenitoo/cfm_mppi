@@ -173,6 +173,55 @@ class _FakeWorldFrameEnv:
         self.close_count += 1
 
 
+class _FakeSampledWorldFrameEnv(_FakeWorldFrameEnv):
+    """Minimal model of the pinned SocNavGym-v1 reset sampling hooks."""
+
+    ROBOT_KIND = SimpleNamespace(name="ROBOT")
+
+    def __init__(self):
+        super().__init__()
+        self.objects = []
+        self.random_goal_saw_reservation = False
+        self.random_goal_calls = 0
+
+    def _get_kwargs(self, object_type, extra_info=None):
+        del extra_info
+        if object_type is not self.ROBOT_KIND:
+            raise AssertionError("unexpected sampled object")
+        return {"x": 1.25, "y": -3.5, "theta": 0.25}
+
+    def sample_goal(self, goal_radius, half_size_x, half_size_y):
+        del half_size_x, half_size_y
+        self.random_goal_calls += 1
+        self.random_goal_saw_reservation = any(
+            getattr(obj, "name", None) == "plant" for obj in self.objects
+        )
+        return SimpleNamespace(
+            id=None,
+            name="plant",
+            x=2.5,
+            y=-1.5,
+            orientation=0.0,
+            radius=goal_radius,
+        )
+
+    def reset(self, *, seed=None, options=None):
+        self.reset_seed = seed
+        self.reset_options = options
+        self.objects = []
+        kwargs = self._get_kwargs(self.ROBOT_KIND)
+        self.robot.x = kwargs["x"]
+        self.robot.y = kwargs["y"]
+        self.robot.orientation = kwargs["theta"]
+        self.objects.append(self.robot)
+        # Pedestrian goals remain random and are sampled before the robot goal.
+        self.sample_goal(0.25, 9.5, 9.5)
+        robot_goal = self.sample_goal(self.GOAL_RADIUS, 9.5, 9.5)
+        self.robot.goal_x = robot_goal.x
+        self.robot.goal_y = robot_goal.y
+        return self._observation(), {"reset_seed": seed}
+
+
 class PhysicalActionTest(unittest.TestCase):
     def test_converts_and_clips_physical_diff_drive_action(self):
         action = physical_to_normalized_action(
@@ -209,6 +258,34 @@ class PhysicalActionTest(unittest.TestCase):
 
 
 class SocNavGymAdapterTest(unittest.TestCase):
+    def test_fixed_robot_geometry_reserves_goal_during_random_sampling(self):
+        env = _FakeSampledWorldFrameEnv()
+        adapter = SocNavGymAdapter(
+            env=env,
+            fixed_robot_start=(8.0, 8.0),
+            fixed_robot_goal=(-8.0, -8.0),
+        )
+
+        state, _ = adapter.reset(seed=1000)
+
+        np.testing.assert_array_equal(state.robot_position, [8.0, 8.0])
+        np.testing.assert_array_equal(state.goal, [-8.0, -8.0])
+        self.assertEqual(state.robot_heading, 0.25)
+        self.assertEqual(env.random_goal_calls, 1)
+        self.assertTrue(env.random_goal_saw_reservation)
+        self.assertFalse(
+            any(getattr(obj, "name", None) == "plant" for obj in env.objects)
+        )
+
+        # Sampling hooks are restored after the wrapped reset returns.
+        env.reset(seed=1001)
+        self.assertEqual((env.robot.x, env.robot.y), (1.25, -3.5))
+        self.assertEqual((env.robot.goal_x, env.robot.goal_y), (2.5, -1.5))
+
+    def test_fixed_robot_start_and_goal_must_be_paired(self):
+        with self.assertRaisesRegex(ValueError, "specified together"):
+            SocNavGymAdapter(env=_FakeWorldFrameEnv(), fixed_robot_start=(8.0, 8.0))
+
     def test_reset_parses_world_frame_state_and_exposes_limits(self):
         env = _FakeWorldFrameEnv()
         adapter = SocNavGymAdapter(env=env)

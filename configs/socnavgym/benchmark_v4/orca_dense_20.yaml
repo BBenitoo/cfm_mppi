@@ -1,0 +1,94 @@
+rendering:
+    resolution_view: 1000
+    milliseconds: 1
+
+episode:
+    episode_length: 256
+    time_step: 0.1
+    end_with_collision: true
+
+robot:
+    robot_radius: 0.25
+    goal_radius: 0.35
+    robot_type: "diff-drive"
+    min_goal_orientation_threshold: 6.283185307179586
+    max_goal_orientation_threshold: 6.283185307179586
+
+human:
+    human_diameter: 0.72
+    human_goal_radius: 0.25
+    human_policy: "orca"
+    gaze_angle: 3.141592653589793
+    fov_angle: 6.283185307179586
+    prob_to_avoid_robot: 1.0
+
+laptop:
+    laptop_width: 0.4
+    laptop_length: 0.6
+
+plant:
+    plant_radius: 0.4
+
+table:
+    table_width: 1.5
+    table_length: 3.0
+
+wall:
+    wall_thickness: 0.2
+
+human-human-interaction:
+    interaction_radius: 0.72
+    interaction_goal_radius: 1.44
+    noise_variance: 0.0
+
+human-laptop-interaction:
+    human_laptop_distance: 0.3
+
+env:
+    margin: 0.5
+    max_advance_human: 0.8
+    max_rotation_human: 1.57
+    max_advance_robot: 1.0
+    max_rotation: 1.0
+    wall_segment_size: 1.0
+    speed_threshold: 0.005
+    crowd_dispersal_probability: 0.0
+    human_laptop_dispersal_probability: 0.0
+    crowd_formation_probability: 0.0
+    human_laptop_formation_probability: 0.0
+    reward_file: "dsrnn"
+    cuda_device: 0
+
+    min_static_humans: 0
+    max_static_humans: 0
+    min_dynamic_humans: 20
+    max_dynamic_humans: 20
+    min_tables: 0
+    max_tables: 0
+    min_plants: 0
+    max_plants: 0
+    min_laptops: 0
+    max_laptops: 0
+
+    min_h_h_dynamic_interactions: 0
+    max_h_h_dynamic_interactions: 0
+    min_h_h_dynamic_interactions_non_dispersing: 0
+    max_h_h_dynamic_interactions_non_dispersing: 0
+    min_h_h_static_interactions: 0
+    max_h_h_static_interactions: 0
+    min_h_h_static_interactions_non_dispersing: 0
+    max_h_h_static_interactions_non_dispersing: 0
+    min_human_in_h_h_interactions: 0
+    max_human_in_h_h_interactions: 0
+    min_h_l_interactions: 0
+    max_h_l_interactions: 0
+    min_h_l_interactions_non_dispersing: 0
+    max_h_l_interactions_non_dispersing: 0
+
+    get_padded_observations: false
+    set_shape: "no-walls"
+    add_corridors: false
+    min_map_x: 20
+    max_map_x: 20
+    min_map_y: 20
+    max_map_y: 20

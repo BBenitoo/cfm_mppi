@@ -328,6 +328,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--cfm-candidates", type=int, default=200)
     parser.add_argument("--branches", type=int, default=10)
     parser.add_argument("--mppi-samples-per-branch", type=int, default=200)
+    parser.add_argument("--robot-start", type=float, nargs=2, metavar=("X", "Y"))
+    parser.add_argument("--robot-goal", type=float, nargs=2, metavar=("X", "Y"))
     return parser
 
 
@@ -360,8 +362,16 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         config=planner_config,
         device=device,
     )
+    robot_start = getattr(args, "robot_start", None)
+    robot_goal = getattr(args, "robot_goal", None)
+    if (robot_start is None) != (robot_goal is None):
+        raise ValueError("robot_start and robot_goal must be specified together")
     paired_result = run_paired_socnavgym_evaluation(
-        lambda: SocNavGymAdapter(config_path),
+        lambda: SocNavGymAdapter(
+            config_path,
+            fixed_robot_start=robot_start,
+            fixed_robot_goal=robot_goal,
+        ),
         factories,
         env_seeds=args.seeds,
         planner_seed_for_env=lambda env_seed: env_seed + args.planner_seed_offset,

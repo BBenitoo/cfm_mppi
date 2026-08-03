@@ -14,6 +14,8 @@ import signal
 import tempfile
 from typing import Any, Iterable, Mapping, Sequence
 
+import numpy as np
+
 from cfm_mppi.evaluation.socnavgym_benchmark import (
     BenchmarkContractError,
     BenchmarkJob,
@@ -132,7 +134,7 @@ def _job_description(
     job: BenchmarkJob,
     output_root: Path,
 ) -> dict[str, Any]:
-    return {
+    description = {
         "suite_id": suite.suite_id,
         "job_index": job.index,
         "scenario_id": job.scenario.id,
@@ -155,6 +157,10 @@ def _job_description(
         ),
         "output": str(suite.output_path(output_root, job)),
     }
+    if job.scenario.robot_start is not None:
+        description["robot_start"] = list(job.scenario.robot_start)
+        description["robot_goal"] = list(job.scenario.robot_goal)
+    return description
 
 
 def list_jobs(suite: BenchmarkSuite, output_root: Path) -> None:
@@ -185,7 +191,11 @@ def validate_environment_matrix(suite: BenchmarkSuite) -> dict[str, Any]:
             flush=True,
         )
         with _deadline(30.0, f"constructing {scenario.id}"):
-            environment = SocNavGymAdapter(scenario.config_path)
+            environment = SocNavGymAdapter(
+                scenario.config_path,
+                fixed_robot_start=scenario.robot_start,
+                fixed_robot_goal=scenario.robot_goal,
+            )
         try:
             if environment.time_step != 0.1 or environment.episode_length != 256:
                 raise BenchmarkContractError(
@@ -206,6 +216,21 @@ def validate_environment_matrix(suite: BenchmarkSuite) -> dict[str, Any]:
                     raise BenchmarkContractError(
                         f"{scenario.id} seed {env_seed}: human IDs are not stable/sorted"
                     )
+                if scenario.robot_start is not None:
+                    if not np.array_equal(
+                        state.robot_position,
+                        np.asarray(scenario.robot_start, dtype=np.float32),
+                    ):
+                        raise BenchmarkContractError(
+                            f"{scenario.id} seed {env_seed}: robot start is not fixed"
+                        )
+                    if not np.array_equal(
+                        state.goal,
+                        np.asarray(scenario.robot_goal, dtype=np.float32),
+                    ):
+                        raise BenchmarkContractError(
+                            f"{scenario.id} seed {env_seed}: robot goal is not fixed"
+                        )
                 validated += 1
         finally:
             environment.close()
@@ -520,6 +545,8 @@ def run_job(
         cfm_candidates=planner["cfm_candidates"],
         branches=planner["branches"],
         mppi_samples_per_branch=planner["mppi_samples_per_branch"],
+        robot_start=job.scenario.robot_start,
+        robot_goal=job.scenario.robot_goal,
     )
     document = run_evaluation(evaluation_args)
     document["benchmark"] = benchmark_metadata(suite, job)

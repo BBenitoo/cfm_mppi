@@ -18,6 +18,7 @@ from dataclasses import dataclass
 import importlib
 from pathlib import Path
 from types import MappingProxyType
+from types import MethodType, SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -560,6 +561,8 @@ class SocNavGymAdapter:
         *,
         env_id: str = DEFAULT_ENV_ID,
         env: Any | None = None,
+        fixed_robot_start: Sequence[float] | np.ndarray | None = None,
+        fixed_robot_goal: Sequence[float] | np.ndarray | None = None,
     ) -> None:
         if env is not None and config_path is not None:
             raise ValueError("pass either config_path or env, not both")
@@ -575,6 +578,24 @@ class SocNavGymAdapter:
         self._state: SocNavState | None = None
         self._human_ids: tuple[int, ...] | None = None
         self._requires_geometric_goal_policy = created_from_config
+        if (fixed_robot_start is None) != (fixed_robot_goal is None):
+            raise ValueError(
+                "fixed_robot_start and fixed_robot_goal must be specified together"
+            )
+        self._fixed_robot_start = (
+            None
+            if fixed_robot_start is None
+            else _readonly_float_vector(
+                fixed_robot_start, shape=(2,), name="fixed robot start"
+            )
+        )
+        self._fixed_robot_goal = (
+            None
+            if fixed_robot_goal is None
+            else _readonly_float_vector(
+                fixed_robot_goal, shape=(2,), name="fixed robot goal"
+            )
+        )
 
     def _assert_geometric_goal_policy(self) -> None:
         if not self._requires_geometric_goal_policy:
@@ -710,10 +731,7 @@ class SocNavGymAdapter:
         self._state = None
         self._human_ids = None
         self._episode_done = False
-        if options is None:
-            result = self._env.reset(seed=seed)
-        else:
-            result = self._env.reset(seed=seed, options=dict(options))
+        result = self._reset_environment(seed=seed, options=options)
         self._assert_geometric_goal_policy()
         if not isinstance(result, tuple) or len(result) != 2:
             raise SocNavGymAdapterError(
@@ -724,9 +742,97 @@ class SocNavGymAdapter:
             raise SocNavGymAdapterError("reset info must be a mapping")
 
         state = parse_world_frame_observation(observation, self.unwrapped)
+        if self._fixed_robot_start is not None:
+            if not np.array_equal(state.robot_position, self._fixed_robot_start):
+                raise SocNavGymAdapterError(
+                    "SocNavGym reset did not preserve the fixed robot start"
+                )
+            if not np.array_equal(state.goal, self._fixed_robot_goal):
+                raise SocNavGymAdapterError(
+                    "SocNavGym reset did not preserve the fixed robot goal"
+                )
         self._state = state
         self._human_ids = state.human_ids
         return state, dict(info)
+
+    def _reset_environment(
+        self,
+        *,
+        seed: int | None,
+        options: Mapping[str, Any] | None,
+    ) -> Any:
+        if self._fixed_robot_start is None:
+            if options is None:
+                return self._env.reset(seed=seed)
+            return self._env.reset(seed=seed, options=dict(options))
+
+        base_env = self.unwrapped
+        original_get_kwargs = getattr(base_env, "_get_kwargs", None)
+        original_sample_goal = getattr(base_env, "sample_goal", None)
+        if not callable(original_get_kwargs) or not callable(original_sample_goal):
+            raise SocNavGymAdapterError(
+                "fixed robot geometry requires the pinned SocNavGym-v1 sampling API"
+            )
+
+        start = self._fixed_robot_start
+        goal = self._fixed_robot_goal
+        reservation = SimpleNamespace(
+            id=None,
+            name="plant",
+            x=float(goal[0]),
+            y=float(goal[1]),
+            orientation=0.0,
+            radius=float(getattr(base_env, "GOAL_RADIUS", np.nan)),
+        )
+        if not np.isfinite(reservation.radius) or reservation.radius <= 0:
+            raise SocNavGymAdapterError(
+                "SocNavGym environment has no valid GOAL_RADIUS for fixed geometry"
+            )
+
+        def fixed_get_kwargs(environment, object_type, extra_info=None):
+            kwargs = original_get_kwargs(object_type, extra_info)
+            if getattr(object_type, "name", None) == "ROBOT":
+                kwargs = dict(kwargs)
+                kwargs["x"] = float(start[0])
+                kwargs["y"] = float(start[1])
+                objects = getattr(environment, "objects", None)
+                if not isinstance(objects, list):
+                    raise SocNavGymAdapterError(
+                        "SocNavGym-v1 objects collection is unavailable"
+                    )
+                if not any(obj is reservation for obj in objects):
+                    objects.append(reservation)
+            return kwargs
+
+        def fixed_sample_goal(environment, goal_radius, half_size_x, half_size_y):
+            del environment
+            if np.isclose(goal_radius, reservation.radius, rtol=0.0, atol=1e-12):
+                return reservation
+            return original_sample_goal(goal_radius, half_size_x, half_size_y)
+
+        instance_attributes = vars(base_env)
+        previous_get_kwargs = instance_attributes.get("_get_kwargs")
+        previous_sample_goal = instance_attributes.get("sample_goal")
+        had_get_kwargs = "_get_kwargs" in instance_attributes
+        had_sample_goal = "sample_goal" in instance_attributes
+        base_env._get_kwargs = MethodType(fixed_get_kwargs, base_env)
+        base_env.sample_goal = MethodType(fixed_sample_goal, base_env)
+        try:
+            if options is None:
+                return self._env.reset(seed=seed)
+            return self._env.reset(seed=seed, options=dict(options))
+        finally:
+            objects = getattr(base_env, "objects", None)
+            if isinstance(objects, list):
+                objects[:] = [obj for obj in objects if obj is not reservation]
+            if had_get_kwargs:
+                base_env._get_kwargs = previous_get_kwargs
+            else:
+                delattr(base_env, "_get_kwargs")
+            if had_sample_goal:
+                base_env.sample_goal = previous_sample_goal
+            else:
+                delattr(base_env, "sample_goal")
 
     def step(
         self,

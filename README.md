@@ -44,6 +44,9 @@ The higher-density 5/10/15-human, 50-seed follow-up suite is documented in
 [`docs/socnavgym_benchmark_v2.md`](docs/socnavgym_benchmark_v2.md).
 The fixed 10-human, 300-seed benchmark v3 is documented in
 [`docs/socnavgym_benchmark_v3.md`](docs/socnavgym_benchmark_v3.md).
+The 20 m x 20 m fixed-route, 10/15/20-human, 100-seed benchmark v4 is
+documented in
+[`docs/socnavgym_benchmark_v4.md`](docs/socnavgym_benchmark_v4.md).
 
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:
