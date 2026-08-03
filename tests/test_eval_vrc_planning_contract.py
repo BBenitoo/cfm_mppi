@@ -131,6 +131,7 @@ class VRCPlanningCharacterizationTest(unittest.TestCase):
         build_scalar_tube.assert_not_called()
         torch.testing.assert_close(solver.received_predictions, branch_predictions)
         torch.testing.assert_close(plan.pedestrian_predictions, branch_predictions)
+        torch.testing.assert_close(plan.cfm_branch_controls, branch_controls)
         self.assertEqual(plan.selected_branch, 1)
         torch.testing.assert_close(plan.selected_cfm_controls, cfm_controls[1:2])
         self.assertIsNone(plan.selected_vrc_tube)

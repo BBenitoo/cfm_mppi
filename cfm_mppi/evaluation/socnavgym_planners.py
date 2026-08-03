@@ -24,6 +24,7 @@ import torch
 from cfm_mppi.evaluation.eval_utils import CFMConfig
 from cfm_mppi.evaluation.eval_vrc import (
     PedestrianPredictionParameters,
+    constant_velocity_prediction,
     plan_vrc_branches,
 )
 from cfm_mppi.evaluation.eval_vrc_cv_prediction import (
@@ -40,7 +41,12 @@ from cfm_mppi.mppi.utils import stage_cost, terminal_cost
 from cfm_mppi.vrc.build_vrc import (
     RobotForceParameters,
     VRCParameters,
+    build_tensor_vrc_tube,
+    force_from_tensor_vrc_tube,
 )
+
+
+VISUALIZATION_TRACE_SCHEMA = "cfm_mppi.socnavgym_visualization_trace.v1"
 
 
 @dataclass(frozen=True)
@@ -203,12 +209,16 @@ class _SocNavCFMPlannerBase:
         config: SocNavPlannerConfig | None = None,
         device: str | torch.device | None = None,
         solver_factory: Callable[..., Any] = FlowMPPI,
+        record_visualization: bool = False,
     ) -> None:
+        if not isinstance(record_visualization, bool):
+            raise TypeError("record_visualization must be a boolean")
         self.model = model
         self.config = config or SocNavPlannerConfig()
         self.budget = self.config.budget
         self.device = self._resolve_device(device)
         self._solver_factory = solver_factory
+        self.record_visualization = record_visualization
         self._solver: Any | None = None
         self._context: EpisodeContext | None = None
         self._histories: dict[str, _TensorHistory] = {}
@@ -451,22 +461,28 @@ class _SocNavCFMPlannerBase:
         )
         branch_indices = plan.cfm_branch_indices.detach().cpu().tolist()
         branch_costs = plan.branch_costs.detach().cpu().tolist()
-        command = PlannerCommand(
-            control=control,
-            diagnostics={
-                "planner_kind": self.name,
-                "history_length": history_length,
-                "future_horizon": future_horizon,
-                "cfm_candidates": self.config.cfm_candidates,
-                "branches": self.config.branches,
-                "mppi_samples_per_branch": self.config.mppi_samples_per_branch,
-                "refinement_rollouts": self.config.refinement_rollouts,
-                "selected_branch": int(plan.selected_branch),
-                "cfm_branch_indices": branch_indices,
-                "branch_costs": branch_costs,
-                "selected_vrc_tube": False,
-            },
-        )
+        diagnostics = {
+            "planner_kind": self.name,
+            "history_length": history_length,
+            "future_horizon": future_horizon,
+            "cfm_candidates": self.config.cfm_candidates,
+            "branches": self.config.branches,
+            "mppi_samples_per_branch": self.config.mppi_samples_per_branch,
+            "refinement_rollouts": self.config.refinement_rollouts,
+            "selected_branch": int(plan.selected_branch),
+            "cfm_branch_indices": branch_indices,
+            "branch_costs": branch_costs,
+            "selected_vrc_tube": False,
+        }
+        if self.record_visualization:
+            diagnostics["visualization"] = self._build_visualization_trace(
+                plan=plan,
+                state=state,
+                human_positions=human_positions,
+                human_velocities=human_velocities,
+                future_horizon=future_horizon,
+            )
+        command = PlannerCommand(control=control, diagnostics=diagnostics)
         self._pending = _PendingPlan(
             command=command,
             state=state,
@@ -492,6 +508,55 @@ class _SocNavCFMPlannerBase:
             raise RuntimeError("planner returned the wrong number of CFM branches")
         if plan.branch_costs.numel() != self.config.branches:
             raise RuntimeError("planner returned the wrong number of branch costs")
+
+    def _build_visualization_trace(
+        self,
+        *,
+        plan: Any,
+        state: SocNavState,
+        human_positions: torch.Tensor,
+        human_velocities: torch.Tensor,
+        future_horizon: int,
+    ) -> dict[str, Any]:
+        """Capture planner-only geometry without changing the environment contract."""
+        selected_branch = int(plan.selected_branch)
+        no_vrc_prediction = constant_velocity_prediction(
+            positions=human_positions,
+            velocities=human_velocities,
+            horizon=future_horizon,
+            dt=self._context.time_step,
+        ).squeeze(0).transpose(1, 2)
+        trace: dict[str, Any] = {
+            "schema_version": VISUALIZATION_TRACE_SCHEMA,
+            "human_ids": list(state.human_ids),
+            "robot_candidate_trajectories": plan.cfm_branch_states.detach(),
+            "robot_conditioning_trajectory": plan.cfm_branch_states[
+                selected_branch
+            ].detach(),
+            "robot_prediction": plan.mppi_branch_states[selected_branch].detach(),
+            "pedestrian_prediction_no_vrc": no_vrc_prediction.detach(),
+            "pedestrian_prediction_vrc": None,
+            "vrc_tube": None,
+            "vrc_forces": None,
+        }
+        trace.update(
+            self._build_vrc_visualization_trace(
+                plan=plan,
+                state=state,
+                human_positions=human_positions,
+            )
+        )
+        return trace
+
+    def _build_vrc_visualization_trace(
+        self,
+        *,
+        plan: Any,
+        state: SocNavState,
+        human_positions: torch.Tensor,
+    ) -> dict[str, Any]:
+        del plan, state, human_positions
+        return {}
 
     def observe_transition(
         self,
@@ -746,12 +811,14 @@ class SocNavVRCMPPIPlanner(_SocNavCFMPlannerBase):
         vrc_params: VRCParameters | None = None,
         robot_force_params: RobotForceParameters | None = None,
         prediction_params: PedestrianPredictionParameters | None = None,
+        record_visualization: bool = False,
     ) -> None:
         super().__init__(
             model,
             config=config,
             device=device,
             solver_factory=solver_factory,
+            record_visualization=record_visualization,
         )
         self._vrc_template = vrc_params or VRCParameters()
         self._robot_force_params = robot_force_params or RobotForceParameters()
@@ -759,19 +826,22 @@ class SocNavVRCMPPIPlanner(_SocNavCFMPlannerBase):
             prediction_params or PedestrianPredictionParameters()
         )
 
+    def _episode_vrc_params(self, state: SocNavState) -> VRCParameters:
+        maximum_human_radius = (
+            float(state.human_radii.max())
+            if state.human_radii.size
+            else self._vrc_template.pedestrian_radius
+        )
+        return replace(
+            self._vrc_template,
+            robot_radius=float(state.robot_radius),
+            pedestrian_radius=maximum_human_radius,
+        )
+
     def _plan_branches(self, **kwargs: Any) -> Any:
         initial_state = kwargs.pop("initial_state")
         cfm_config = kwargs.pop("cfm_config")
-        maximum_human_radius = (
-            float(initial_state.human_radii.max())
-            if initial_state.human_radii.size
-            else self._vrc_template.pedestrian_radius
-        )
-        episode_vrc_params = replace(
-            self._vrc_template,
-            robot_radius=float(initial_state.robot_radius),
-            pedestrian_radius=maximum_human_radius,
-        )
+        episode_vrc_params = self._episode_vrc_params(initial_state)
         prediction_params = replace(
             self._prediction_template,
             # Keep the internal prediction within the same physical speed
@@ -797,10 +867,53 @@ class SocNavVRCMPPIPlanner(_SocNavCFMPlannerBase):
             )
         return plan
 
+    def _build_vrc_visualization_trace(
+        self,
+        *,
+        plan: Any,
+        state: SocNavState,
+        human_positions: torch.Tensor,
+    ) -> dict[str, Any]:
+        """Record the exact pre-MPPI VRC that generated the blue forecast."""
+        selected_branch = int(plan.selected_branch)
+        conditioning_states = plan.cfm_branch_states[
+            selected_branch : selected_branch + 1
+        ]
+        conditioning_controls = plan.cfm_branch_controls[
+            selected_branch : selected_branch + 1
+        ]
+        tube = build_tensor_vrc_tube(
+            states=conditioning_states,
+            controls_uni=conditioning_controls,
+            params=self._episode_vrc_params(state),
+        )
+        forces = force_from_tensor_vrc_tube(
+            pedestrian_positions=human_positions,
+            vrc_tube=tube,
+            current_index=0,
+            force_params=self._robot_force_params,
+            preview_steps=self._prediction_template.preview_steps,
+            discount=self._prediction_template.preview_discount,
+        )
+        return {
+            "pedestrian_prediction_vrc": plan.pedestrian_predictions[
+                selected_branch
+            ].detach(),
+            "vrc_tube": {
+                "centers": tube.centers[0].detach(),
+                "longitudinal_radii": tube.longitudinal_radii[0].detach(),
+                "lateral_radii": tube.lateral_radii[0].detach(),
+                "theta": conditioning_states[0, :, 2].detach(),
+                "influence_cutoff": self._robot_force_params.influence_cutoff,
+            },
+            "vrc_forces": forces[0].detach(),
+        }
+
 
 __all__ = [
     "SocNavCFMMPPIPlanner",
     "SocNavPlannerConfig",
     "SocNavVRCMPPIPlanner",
+    "VISUALIZATION_TRACE_SCHEMA",
     "socnav_diff_drive_dynamics",
 ]

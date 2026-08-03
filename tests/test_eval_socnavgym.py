@@ -8,7 +8,9 @@ import torch
 
 from cfm_mppi.evaluation.eval_socnavgym import (
     _load_model,
+    build_argument_parser,
     parse_seed_spec,
+    run_evaluation,
 )
 
 
@@ -65,6 +67,14 @@ class SocNavGymEvaluationCLITest(unittest.TestCase):
         self.assertFalse(model.training)
         torch.testing.assert_close(model.weight, source_model.weight)
         torch.testing.assert_close(model.bias, source_model.bias)
+
+    def test_visualization_trace_requires_step_records(self):
+        args = build_argument_parser().parse_args(
+            ["--record-visualization", "--summary-only"]
+        )
+
+        with self.assertRaisesRegex(ValueError, "requires step records"):
+            run_evaluation(args)
 
 
 if __name__ == "__main__":

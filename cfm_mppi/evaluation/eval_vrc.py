@@ -91,6 +91,7 @@ class BranchPlan:
     selected_branch: int
     cfm_branch_indices: torch.Tensor
     cfm_branch_states: torch.Tensor
+    cfm_branch_controls: torch.Tensor
     pedestrian_predictions: torch.Tensor
     mppi_branch_states: torch.Tensor
     branch_costs: torch.Tensor
@@ -402,6 +403,7 @@ def plan_vrc_branches(
         selected_branch=selected_branch,
         cfm_branch_indices=branch_indices,
         cfm_branch_states=branch_states,
+        cfm_branch_controls=branch_controls,
         pedestrian_predictions=pedestrian_predictions,
         mppi_branch_states=mppi_branch_states,
         branch_costs=branch_costs,

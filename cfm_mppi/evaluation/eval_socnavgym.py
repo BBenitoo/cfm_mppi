@@ -225,17 +225,20 @@ def _planner_factories(
     model: TransformerModel,
     config: SocNavPlannerConfig,
     device: torch.device,
+    record_visualization: bool = False,
 ):
     available = {
         SocNavCFMMPPIPlanner.name: lambda: SocNavCFMMPPIPlanner(
             model,
             config=config,
             device=device,
+            record_visualization=record_visualization,
         ),
         SocNavVRCMPPIPlanner.name: lambda: SocNavVRCMPPIPlanner(
             model,
             config=config,
             device=device,
+            record_visualization=record_visualization,
         ),
     }
     if selection == "both":
@@ -286,6 +289,9 @@ def _result_document(
         "planner_config": asdict(planner_config),
         "planner_seed_offset": args.planner_seed_offset,
         "execution_order_offset": getattr(args, "execution_order_offset", 0),
+        "visualization_trace": bool(
+            getattr(args, "record_visualization", False)
+        ),
         **_git_metadata(),
     }
     return document
@@ -319,6 +325,14 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--summary-only", action="store_true")
     parser.add_argument(
+        "--record-visualization",
+        action="store_true",
+        help=(
+            "record selected robot forecasts, no-VRC/VRC pedestrian forecasts, "
+            "the causal VRC tube, and current forces for figure generation"
+        ),
+    )
+    parser.add_argument(
         "--allow-random-model",
         action="store_true",
         help="allow an untrained model strictly for integration smoke tests",
@@ -341,6 +355,13 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     """
     config_path = Path(args.config).expanduser().resolve()
     checkpoint_path = Path(args.checkpoint).expanduser().resolve()
+    record_visualization = bool(
+        getattr(args, "record_visualization", False)
+    )
+    if record_visualization and args.summary_only:
+        raise ValueError(
+            "record_visualization requires step records; remove --summary-only"
+        )
     if not config_path.is_file():
         raise FileNotFoundError(f"SocNavGym config not found: {config_path}")
     device = _resolve_device(args.device)
@@ -361,6 +382,7 @@ def run_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         model=model,
         config=planner_config,
         device=device,
+        record_visualization=record_visualization,
     )
     robot_start = getattr(args, "robot_start", None)
     robot_goal = getattr(args, "robot_goal", None)

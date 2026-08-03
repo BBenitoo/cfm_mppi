@@ -96,3 +96,11 @@ python -m cfm_mppi.evaluation.eval_socnavgym \
   --cfm-candidates 10 --branches 2 --mppi-samples-per-branch 2 \
   --output output_dir/socnavgym/smoke.json
 ```
+
+## Visualization
+
+To record a separate per-step planner trace and export matched baseline/VRC
+static figures and animations, see
+[`socnavgym_visualization.md`](socnavgym_visualization.md). The trace is opt-in
+and cannot be reconstructed from existing summary or immutable benchmark
+outputs.

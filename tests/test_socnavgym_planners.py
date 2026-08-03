@@ -97,14 +97,30 @@ def _branch_plan(kwargs, *, selected_vrc_tube=None):
     future_horizon = total_horizon - history_length
     branches = kwargs["num_branches"]
     device = kwargs["state"].device
-    return SimpleNamespace(
-        selected_controls=torch.cat(
-            (
-                torch.full((future_horizon, 1), 0.25, device=device),
-                torch.full((future_horizon, 1), -0.1, device=device),
-            ),
-            dim=1,
+    selected_controls = torch.cat(
+        (
+            torch.full((future_horizon, 1), 0.25, device=device),
+            torch.full((future_horizon, 1), -0.1, device=device),
         ),
+        dim=1,
+    )
+    times = torch.arange(
+        future_horizon + 1,
+        device=device,
+        dtype=torch.float32,
+    )
+    branch_states = kwargs["state"].expand(branches, -1).unsqueeze(1).repeat(
+        1, future_horizon + 1, 1
+    )
+    branch_states[:, :, 0] += 0.025 * times
+    branch_states[:, :, 1] -= 0.01 * times
+    branch_controls = selected_controls.unsqueeze(0).expand(branches, -1, -1)
+    pedestrian_predictions = kwargs["current_positions"].squeeze(0).unsqueeze(
+        0
+    ).unsqueeze(2).expand(branches, -1, future_horizon, -1).clone()
+    pedestrian_predictions[..., 0] += 0.01
+    return SimpleNamespace(
+        selected_controls=selected_controls,
         selected_cfm_controls=torch.full(
             (1, 2, total_horizon),
             0.5,
@@ -112,6 +128,12 @@ def _branch_plan(kwargs, *, selected_vrc_tube=None):
         ),
         selected_branch=1,
         cfm_branch_indices=torch.arange(branches, device=device),
+        cfm_branch_states=branch_states,
+        cfm_branch_controls=branch_controls,
+        pedestrian_predictions=pedestrian_predictions,
+        mppi_branch_states=branch_states + torch.tensor(
+            [0.02, -0.01, 0.0], device=device
+        ),
         branch_costs=torch.arange(branches, device=device, dtype=torch.float32),
         selected_vrc_tube=selected_vrc_tube,
     )
@@ -262,6 +284,72 @@ class SharedPlannerContractTest(unittest.TestCase):
             ),
         ), self.assertRaisesRegex(RuntimeError, "remain internal"):
             planner.plan(initial, 0)
+
+    def test_visualization_trace_is_opt_in_and_uses_causal_vrc_branch(self) -> None:
+        config = _planner_config()
+        initial = _state()
+        context = _context()
+        baseline = SocNavCFMMPPIPlanner(
+            torch.nn.Identity(),
+            config=config,
+            device="cpu",
+            solver_factory=_CaptureSolver,
+            record_visualization=True,
+        )
+        vrc = SocNavVRCMPPIPlanner(
+            torch.nn.Identity(),
+            config=config,
+            device="cpu",
+            solver_factory=_CaptureSolver,
+            record_visualization=True,
+        )
+        baseline.reset_episode(initial, context)
+        vrc.reset_episode(initial, context)
+
+        with (
+            mock.patch(
+                "cfm_mppi.evaluation.socnavgym_planners."
+                "plan_with_constant_velocity_prediction",
+                side_effect=lambda **kwargs: _branch_plan(kwargs),
+            ),
+            mock.patch(
+                "cfm_mppi.evaluation.socnavgym_planners.plan_vrc_branches",
+                side_effect=lambda **kwargs: _branch_plan(kwargs),
+            ),
+        ):
+            baseline_trace = baseline.plan(initial, 0).diagnostics[
+                "visualization"
+            ]
+            vrc_trace = vrc.plan(initial, 0).diagnostics["visualization"]
+
+        self.assertEqual(baseline_trace["human_ids"], [7])
+        self.assertIsNone(baseline_trace["pedestrian_prediction_vrc"])
+        self.assertIsNone(baseline_trace["vrc_tube"])
+        self.assertEqual(
+            tuple(vrc_trace["robot_candidate_trajectories"].shape),
+            (2, 7, 3),
+        )
+        self.assertEqual(tuple(vrc_trace["robot_prediction"].shape), (7, 3))
+        self.assertEqual(
+            tuple(vrc_trace["pedestrian_prediction_no_vrc"].shape),
+            (1, 6, 2),
+        )
+        self.assertEqual(
+            tuple(vrc_trace["pedestrian_prediction_vrc"].shape),
+            (1, 6, 2),
+        )
+        self.assertEqual(tuple(vrc_trace["vrc_forces"].shape), (1, 2))
+        self.assertEqual(tuple(vrc_trace["vrc_tube"]["centers"].shape), (7, 2))
+        torch.testing.assert_close(
+            vrc_trace["robot_conditioning_trajectory"],
+            vrc_trace["robot_candidate_trajectories"][1],
+        )
+        self.assertFalse(
+            torch.equal(
+                vrc_trace["robot_conditioning_trajectory"],
+                vrc_trace["robot_prediction"],
+            )
+        )
 
 
 class PlannerHistoryAndWarmStartTest(unittest.TestCase):

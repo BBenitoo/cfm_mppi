@@ -164,6 +164,7 @@ def plan_with_constant_velocity_prediction(
         selected_branch=selected_branch,
         cfm_branch_indices=branch_indices,
         cfm_branch_states=branch_states,
+        cfm_branch_controls=branch_controls,
         pedestrian_predictions=branch_obstacle_predictions,
         mppi_branch_states=mppi_branch_states,
         branch_costs=branch_costs,
