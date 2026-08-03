@@ -40,6 +40,8 @@ fresh SocNavGym environment for every method/seed pair and keeps VRC strictly
 inside the planner. The locked 6-scenario x 30-seed H100 benchmark and exact
 experiment commands are in
 [`docs/socnavgym_benchmark.md`](docs/socnavgym_benchmark.md).
+The higher-density 5/10/15-human, 50-seed follow-up suite is documented in
+[`docs/socnavgym_benchmark_v2.md`](docs/socnavgym_benchmark_v2.md).
 
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:
