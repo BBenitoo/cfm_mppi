@@ -5,7 +5,7 @@
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=32G
-#SBATCH --time=01:00:00
+#SBATCH --time=03:00:00
 #SBATCH --array=0-599%5
 #SBATCH --output=/users/3149157r/MSc/cfm_mppi/cfm_mppi/evaluation/logs/%x-%A_%a.out
 #SBATCH --error=/users/3149157r/MSc/cfm_mppi/cfm_mppi/evaluation/logs/%x-%A_%a.err
