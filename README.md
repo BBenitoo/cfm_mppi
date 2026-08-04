@@ -47,6 +47,9 @@ The fixed 10-human, 300-seed benchmark v3 is documented in
 The 20 m x 20 m fixed-route, 10/15/20-human, 100-seed benchmark v4 is
 documented in
 [`docs/socnavgym_benchmark_v4.md`](docs/socnavgym_benchmark_v4.md).
+The 10 m x 10 m fixed-route, 5/10/15-human, 100-seed benchmark v5 is
+documented in
+[`docs/socnavgym_benchmark_v5.md`](docs/socnavgym_benchmark_v5.md).
 
 ### Training
 To train the CFM (Conditional Flow Matching) model, run:

@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "suite_id": "socnavgym-v1-fixed-route-crowd-density-v5",
+  "description": "Locked 10 m x 10 m benchmark with a fixed robot route from (-4, -4) to (4, 4), 5/10/15 dynamic humans, 100 seeds, and a 25.6 s episode timeout for matched CFM+MPPI versus VRC+MPPI evaluation.",
+  "locked": true,
+  "environment_id": "SocNavGym-v1",
+  "observation_wrapper": "WorldFrameObservations",
+  "socnavgym_commit": "1ef13ee604b71730e9ec7f2d9fd9cb2e8b796549",
+  "human_goal_reached_policy": "geometric-only-v1",
+  "seed_file": "seeds.json",
+  "seed_file_sha256": "a0bd16615c68d3335130574240f6a43a3242a2d70e324b7e035d4dc182880e94",
+  "checkpoint_sha256": "9d92ebc6ae274098514398053d1a4afa91032f48f03026bfd5b63175e8ee53ae",
+  "rvo2_module_sha256": "07975350aae97e876636ae62e1564d5b76cd788b5945d17d4b3a711e3b99391d",
+  "dgl_backend": "pytorch",
+  "device": "cuda",
+  "cuda_device_contains": "H100",
+  "planner_seed_offset": 1000000,
+  "seeds_per_job": 1,
+  "expected_jobs": 600,
+  "expected_scenario_seed_pairs": 600,
+  "output_subdirectory": "socnavgym/benchmark_v5",
+  "planner": {
+    "selection": "both",
+    "horizon": 80,
+    "max_history": 10,
+    "cfm_candidates": 200,
+    "branches": 10,
+    "mppi_samples_per_branch": 200
+  },
+  "scenarios": [
+    {
+      "id": "orca_sparse_5",
+      "role": "primary",
+      "config": "orca_sparse_5.yaml",
+      "config_sha256": "d3ccb49e5f017b0696990cbe77bafe73a55194d6354ed397b36d11587d644315",
+      "human_policy": "orca",
+      "dynamic_humans": 5,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    },
+    {
+      "id": "orca_medium_10",
+      "role": "primary",
+      "config": "orca_medium_10.yaml",
+      "config_sha256": "4dc5ad4791217d9dd70d9029764127cbc99384e1f94bd6cc8f58a07ed4b01823",
+      "human_policy": "orca",
+      "dynamic_humans": 10,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    },
+    {
+      "id": "orca_dense_15",
+      "role": "primary",
+      "config": "orca_dense_15.yaml",
+      "config_sha256": "a81ab37307ebe8717b594143a9990da4513f3228eadcac52b9ac594c122605bd",
+      "human_policy": "orca",
+      "dynamic_humans": 15,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    },
+    {
+      "id": "sfm_sparse_5",
+      "role": "sensitivity",
+      "config": "sfm_sparse_5.yaml",
+      "config_sha256": "f985c13955eef0ff583828880c90fd123f747b711e8f2d6e636c999cdbab3a1c",
+      "human_policy": "sfm",
+      "dynamic_humans": 5,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    },
+    {
+      "id": "sfm_medium_10",
+      "role": "sensitivity",
+      "config": "sfm_medium_10.yaml",
+      "config_sha256": "e4de598e1878b13830fe971d9b2c9e3a0b749383cbaa0def63e52489444a5f88",
+      "human_policy": "sfm",
+      "dynamic_humans": 10,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    },
+    {
+      "id": "sfm_dense_15",
+      "role": "sensitivity",
+      "config": "sfm_dense_15.yaml",
+      "config_sha256": "a3e84dcd0bb53158bb93815e73b9988f75485cc09935b8da8eec1281cbf3bf9d",
+      "human_policy": "sfm",
+      "dynamic_humans": 15,
+      "static_humans": 0,
+      "map_size_metres": [
+        10,
+        10
+      ],
+      "robot_start": [
+        -4,
+        -4
+      ],
+      "robot_goal": [
+        4,
+        4
+      ]
+    }
+  ]
+}
