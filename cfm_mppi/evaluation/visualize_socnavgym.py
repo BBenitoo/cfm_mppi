@@ -2,7 +2,7 @@
 
 The renderer consumes the opt-in trace produced by ``eval_socnavgym
 --record-visualization``.  It deliberately keeps planner-internal predictions
-separate from the simulator's observed pedestrian history.
+separate from the simulator's current pedestrian state.
 """
 
 from __future__ import annotations
@@ -31,6 +31,10 @@ COLOR_FORCE = "#CC79A7"
 COLOR_HISTORY = "#374151"
 COLOR_GOAL = "#009E73"
 COLOR_GRID = "#E5E7EB"
+
+PANEL_WSPACE = 0.03
+LEGEND_FONTSIZE = 9
+FIGURE_SIZE = (9.6, 5.8)
 
 
 class VisualizationTraceError(ValueError):
@@ -263,15 +267,13 @@ def _state_sequence(episode: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return sequence
 
 
-def _history_states(
+def _robot_history_states(
     episode: Mapping[str, Any],
     step_index: int,
-    history_steps: int,
 ) -> list[Mapping[str, Any]]:
     states = _state_sequence(episode)
     current = min(step_index, len(states) - 2)
-    start = 0 if history_steps == 0 else max(0, current - history_steps + 1)
-    return states[start : current + 1]
+    return states[: current + 1]
 
 
 def _frame_step(episode: Mapping[str, Any], frame_index: int) -> int:
@@ -309,28 +311,49 @@ def _collect_state_points(states: Sequence[Mapping[str, Any]]) -> list[np.ndarra
 def _collect_frame_points(
     episode: Mapping[str, Any],
     frame_index: int,
-    history_steps: int,
+    *,
+    is_vrc: bool,
+    show_candidates: bool,
 ) -> list[np.ndarray]:
     step_index = _frame_step(episode, frame_index)
     step = _steps(episode)[step_index]
+    state = step.get("state")
+    if not isinstance(state, Mapping):
+        raise VisualizationTraceError("step is missing its decision-time state")
     trace = _trace(step)
-    points = _collect_state_points(
-        _history_states(episode, step_index, history_steps)
+    history_states = _robot_history_states(episode, step_index)
+    robot_history = np.stack(
+        [
+            _finite_array(
+                history_state.get("robot_state"),
+                name="robot state",
+                last_dim=3,
+            )[:2]
+            for history_state in history_states
+        ]
     )
-    for key, last_dim in (
-        ("robot_candidate_trajectories", 3),
-        ("robot_conditioning_trajectory", 3),
-        ("robot_prediction", 3),
-        ("pedestrian_prediction_no_vrc", 2),
-        ("pedestrian_prediction_vrc", 2),
-    ):
+    points = _collect_state_points([state])
+    points.append(robot_history)
+    trace_geometry = [("robot_prediction", 3)]
+    if show_candidates:
+        trace_geometry.append(("robot_candidate_trajectories", 3))
+    if is_vrc:
+        trace_geometry.extend(
+            [
+                ("robot_conditioning_trajectory", 3),
+                ("pedestrian_prediction_vrc", 2),
+            ]
+        )
+    else:
+        trace_geometry.append(("pedestrian_prediction_no_vrc", 2))
+    for key, last_dim in trace_geometry:
         value = trace.get(key)
         if value is None:
             continue
         array = _finite_array(value, name=key, last_dim=last_dim)
         points.append(array[..., :2].reshape(-1, 2))
     tube = trace.get("vrc_tube")
-    if isinstance(tube, Mapping):
+    if is_vrc and isinstance(tube, Mapping):
         centers = _finite_array(tube.get("centers"), name="VRC centers", last_dim=2)
         longitudinal = _finite_array(
             tube.get("longitudinal_radii"), name="VRC longitudinal radii"
@@ -349,14 +372,26 @@ def _shared_bounds(
     pair: PairedEpisodes,
     frame_indices: Sequence[int],
     *,
-    history_steps: int,
+    show_candidates: bool,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     points: list[np.ndarray] = []
     for frame_index in frame_indices:
         points.extend(
-            _collect_frame_points(pair.baseline, frame_index, history_steps)
+            _collect_frame_points(
+                pair.baseline,
+                frame_index,
+                is_vrc=False,
+                show_candidates=show_candidates,
+            )
         )
-        points.extend(_collect_frame_points(pair.vrc, frame_index, history_steps))
+        points.extend(
+            _collect_frame_points(
+                pair.vrc,
+                frame_index,
+                is_vrc=True,
+                show_candidates=show_candidates,
+            )
+        )
     if not points:
         raise VisualizationTraceError("no finite geometry is available to plot")
     stacked = np.concatenate([point for point in points if point.size], axis=0)
@@ -386,42 +421,6 @@ def _matplotlib():
             "project's vrc environment or install matplotlib>=3.8"
         ) from exc
     return plt, animation, Line2D, Circle, Ellipse, FancyArrowPatch, Patch
-
-
-def _human_histories(
-    states: Sequence[Mapping[str, Any]],
-) -> dict[int, np.ndarray]:
-    histories: dict[int, list[np.ndarray]] = {}
-    for state in states:
-        humans = state.get("humans", [])
-        for human in humans:
-            human_id = int(human["id"])
-            histories.setdefault(human_id, []).append(
-                _finite_array(
-                    human.get("position"), name="human position", last_dim=2
-                )
-            )
-    return {
-        human_id: np.stack(positions)
-        for human_id, positions in histories.items()
-    }
-
-
-def _episode_status(episode: Mapping[str, Any]) -> str:
-    summary = episode.get("summary", {})
-    if not isinstance(summary, Mapping):
-        return ""
-    if summary.get("success"):
-        return "success"
-    if summary.get("collision_any"):
-        return "collision"
-    if summary.get("out_of_map"):
-        return "out of map"
-    if summary.get("timeout"):
-        return "timeout"
-    if summary.get("runner_limit_reached"):
-        return "trace limit"
-    return "ended"
 
 
 def _draw_vrc_tube(ax: Any, trace: Mapping[str, Any], Ellipse: Any, stride: int) -> None:
@@ -509,21 +508,9 @@ def _draw_robot(
 def _draw_humans(
     ax: Any,
     state: Mapping[str, Any],
-    history_states: Sequence[Mapping[str, Any]],
     Circle: Any,
 ) -> None:
-    histories = _human_histories(history_states)
-    for positions in histories.values():
-        ax.plot(
-            positions[:, 0],
-            positions[:, 1],
-            color=COLOR_HISTORY,
-            linewidth=1.35,
-            alpha=0.65,
-            zorder=4,
-        )
     for human in state.get("humans", []):
-        human_id = int(human["id"])
         position = _finite_array(
             human.get("position"), name="human position", last_dim=2
         )
@@ -538,16 +525,26 @@ def _draw_humans(
                 zorder=8,
             )
         )
-        ax.text(
-            position[0],
-            position[1],
-            str(human_id),
-            ha="center",
-            va="center",
-            fontsize=6.5,
-            color=COLOR_HISTORY,
-            zorder=9,
-        )
+
+
+def _draw_robot_start(ax: Any, episode: Mapping[str, Any]) -> None:
+    initial_state = episode.get("initial_state")
+    if not isinstance(initial_state, Mapping):
+        raise VisualizationTraceError("episode is missing initial_state")
+    robot = _finite_array(
+        initial_state.get("robot_state"), name="initial robot state", last_dim=3
+    )
+    ax.plot(
+        [robot[0]],
+        [robot[1]],
+        linestyle="none",
+        marker="x",
+        markersize=7.5,
+        markerfacecolor=COLOR_ROBOT_DARK,
+        markeredgecolor=COLOR_ROBOT_DARK,
+        markeredgewidth=0.7,
+        zorder=8,
+    )
 
 
 def _draw_predictions(
@@ -555,35 +552,41 @@ def _draw_predictions(
     state: Mapping[str, Any],
     trace: Mapping[str, Any],
     *,
+    show_no_vrc: bool,
     show_vrc: bool,
 ) -> None:
     humans = state.get("humans", [])
-    current_positions = np.stack(
-        [
-            _finite_array(human.get("position"), name="human position", last_dim=2)
-            for human in humans
-        ]
-    ) if humans else np.empty((0, 2), dtype=np.float64)
-    no_vrc = _finite_array(
-        trace.get("pedestrian_prediction_no_vrc"),
-        name="no-VRC pedestrian prediction",
-        last_dim=2,
+    current_positions = (
+        np.stack(
+            [
+                _finite_array(human.get("position"), name="human position", last_dim=2)
+                for human in humans
+            ]
+        )
+        if humans
+        else np.empty((0, 2), dtype=np.float64)
     )
-    if no_vrc.shape[0] != len(current_positions):
-        raise VisualizationTraceError(
-            "no-VRC pedestrian prediction does not match current humans"
+    if show_no_vrc:
+        no_vrc = _finite_array(
+            trace.get("pedestrian_prediction_no_vrc"),
+            name="no-VRC pedestrian prediction",
+            last_dim=2,
         )
-    for current, prediction in zip(current_positions, no_vrc):
-        path = np.vstack((current, prediction))
-        ax.plot(
-            path[:, 0],
-            path[:, 1],
-            color=COLOR_NO_VRC,
-            linestyle=(0, (4, 3)),
-            linewidth=1.35,
-            alpha=0.85,
-            zorder=5,
-        )
+        if no_vrc.shape[0] != len(current_positions):
+            raise VisualizationTraceError(
+                "no-VRC pedestrian prediction does not match current humans"
+            )
+        for current, prediction in zip(current_positions, no_vrc):
+            path = np.vstack((current, prediction))
+            ax.plot(
+                path[:, 0],
+                path[:, 1],
+                color=COLOR_NO_VRC,
+                linestyle=(0, (4, 3)),
+                linewidth=1.35,
+                alpha=0.85,
+                zorder=5,
+            )
 
     if not show_vrc:
         return
@@ -592,9 +595,9 @@ def _draw_predictions(
         name="VRC pedestrian prediction",
         last_dim=2,
     )
-    if with_vrc.shape != no_vrc.shape:
+    if with_vrc.shape[0] != len(current_positions):
         raise VisualizationTraceError(
-            "VRC pedestrian prediction shape differs from no-VRC prediction"
+            "VRC pedestrian prediction does not match current humans"
         )
     for current, prediction in zip(current_positions, with_vrc):
         path = np.vstack((current, prediction))
@@ -735,7 +738,6 @@ def _draw_panel(
     frame_index: int,
     *,
     is_vrc: bool,
-    history_steps: int,
     tube_stride: int,
     force_scale: float,
     show_candidates: bool,
@@ -751,7 +753,7 @@ def _draw_panel(
     if not isinstance(state, Mapping):
         raise VisualizationTraceError("step is missing its decision-time state")
     trace = _trace(step)
-    history = _history_states(episode, step_index, history_steps)
+    history = _robot_history_states(episode, step_index)
 
     ax.set_facecolor("white")
     ax.grid(True, color=COLOR_GRID, linewidth=0.7, zorder=0)
@@ -763,17 +765,20 @@ def _draw_panel(
         show_candidates=show_candidates,
         show_conditioning=is_vrc,
     )
-    _draw_humans(ax, state, history, Circle)
-    _draw_predictions(ax, state, trace, show_vrc=is_vrc)
+    _draw_humans(ax, state, Circle)
+    _draw_predictions(
+        ax,
+        state,
+        trace,
+        show_no_vrc=not is_vrc,
+        show_vrc=is_vrc,
+    )
     if is_vrc:
         _draw_force_arrows(ax, state, trace, force_scale=force_scale)
-    _draw_robot(ax, state, Circle, FancyArrowPatch)
 
     robot_history = np.stack(
         [
-            _finite_array(item.get("robot_state"), name="robot state", last_dim=3)[
-                :2
-            ]
+            _finite_array(item.get("robot_state"), name="robot state", last_dim=3)[:2]
             for item in history
         ]
     )
@@ -785,20 +790,21 @@ def _draw_panel(
         alpha=0.55,
         zorder=4,
     )
+    _draw_robot_start(ax, episode)
+    _draw_robot(ax, state, Circle, FancyArrowPatch)
 
     x_limits, y_limits = bounds
     ax.set_xlim(*x_limits)
     ax.set_ylim(*y_limits)
     ax.set_aspect("equal", adjustable="box")
     ax.set_xlabel("x [m]")
-    ax.set_ylabel("y [m]")
+    if not is_vrc:
+        ax.set_ylabel("y [m]")
     ax.tick_params(labelsize=8)
-    label = "VRC · conditioned forecast" if is_vrc else "Baseline · no VRC"
+    label = "VRC" if is_vrc else "Baseline"
     time_seconds = step_index * float(episode["context"]["time_step"])
-    frozen = frame_index >= len(steps)
-    suffix = f" · final ({_episode_status(episode)})" if frozen else ""
     ax.set_title(
-        f"{label}\nstep {step_index} · t = {time_seconds:.1f} s{suffix}",
+        f"{label}\nt = {time_seconds:.1f} s",
         fontsize=10,
         fontweight="bold",
     )
@@ -807,7 +813,7 @@ def _draw_panel(
 def _legend_handles(Line2D: Any, Patch: Any) -> list[Any]:
     return [
         Line2D(
-            [0], [0], color=COLOR_ROBOT, linewidth=2.35, label="Final robot plan"
+            [0], [0], color=COLOR_ROBOT, linewidth=2.35, label="Current robot plan"
         ),
         Line2D(
             [0],
@@ -823,7 +829,7 @@ def _legend_handles(Line2D: Any, Patch: Any) -> list[Any]:
             color=COLOR_NO_VRC,
             linewidth=1.35,
             linestyle=(0, (4, 3)),
-            label="No-VRC forecast (CV)",
+            label="CV forecast",
         ),
         Line2D(
             [0], [0], color=COLOR_VRC, linewidth=1.65, label="VRC forecast"
@@ -838,10 +844,27 @@ def _legend_handles(Line2D: Any, Patch: Any) -> list[Any]:
             [0],
             [0],
             color=COLOR_HISTORY,
-            linewidth=1.35,
+            linewidth=0,
             marker="o",
             markerfacecolor="white",
-            label="Observed pedestrian history",
+            label="Current pedestrians",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=COLOR_ROBOT_DARK,
+            linewidth=1.35,
+            alpha=0.55,
+            label="Robot history",
+        ),
+        Line2D(
+            [0],
+            [0],
+            color=COLOR_ROBOT_DARK,
+            linewidth=0,
+            marker="x",
+            markeredgecolor=COLOR_ROBOT_DARK,
+            label="Robot start",
         ),
         Line2D(
             [0],
@@ -859,12 +882,41 @@ def _new_figure(plt: Any):
     figure, axes = plt.subplots(
         1,
         2,
-        figsize=(12.8, 5.8),
+        figsize=FIGURE_SIZE,
         sharex=True,
         sharey=True,
     )
     figure.patch.set_facecolor("white")
     return figure, axes
+
+
+def _configure_figure(
+    figure: Any,
+    pair: PairedEpisodes,
+    Line2D: Any,
+    Patch: Any,
+) -> None:
+    figure.suptitle(
+        f"Environment seed {pair.env_seed}",
+        fontsize=12,
+        fontweight="bold",
+        y=0.975,
+    )
+    figure.legend(
+        handles=_legend_handles(Line2D, Patch),
+        loc="lower center",
+        ncol=5,
+        frameon=False,
+        fontsize=LEGEND_FONTSIZE,
+        bbox_to_anchor=(0.5, 0.015),
+    )
+    figure.subplots_adjust(
+        left=0.07,
+        right=0.985,
+        top=0.86,
+        bottom=0.19,
+        wspace=PANEL_WSPACE,
+    )
 
 
 def render_static_comparison(
@@ -894,7 +946,7 @@ def render_static_comparison(
     bounds = _shared_bounds(
         pair,
         [selected_step],
-        history_steps=history_steps,
+        show_candidates=show_candidates,
     )
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -914,7 +966,6 @@ def render_static_comparison(
             pair.baseline,
             selected_step,
             is_vrc=False,
-            history_steps=history_steps,
             tube_stride=tube_stride,
             force_scale=force_scale,
             show_candidates=show_candidates,
@@ -928,7 +979,6 @@ def render_static_comparison(
             pair.vrc,
             selected_step,
             is_vrc=True,
-            history_steps=history_steps,
             tube_stride=tube_stride,
             force_scale=force_scale,
             show_candidates=show_candidates,
@@ -937,21 +987,7 @@ def render_static_comparison(
             Ellipse=Ellipse,
             FancyArrowPatch=FancyArrowPatch,
         )
-        figure.suptitle(
-            f"Matched environment seed {pair.env_seed}",
-            fontsize=12,
-            fontweight="bold",
-            y=0.975,
-        )
-        figure.legend(
-            handles=_legend_handles(Line2D, Patch),
-            loc="lower center",
-            ncol=4,
-            frameon=False,
-            fontsize=8,
-            bbox_to_anchor=(0.5, 0.015),
-        )
-        figure.subplots_adjust(left=0.07, right=0.985, top=0.86, bottom=0.19, wspace=0.12)
+        _configure_figure(figure, pair, Line2D, Patch)
         figure.savefig(output, dpi=dpi, facecolor="white", bbox_inches="tight")
         plt.close(figure)
     return output
@@ -980,7 +1016,11 @@ def render_animation_comparison(
         frame_indices.append(max_length - 1)
 
     plt, mpl_animation, Line2D, Circle, Ellipse, FancyArrowPatch, Patch = _matplotlib()
-    bounds = _shared_bounds(pair, frame_indices, history_steps=history_steps)
+    bounds = _shared_bounds(
+        pair,
+        frame_indices,
+        show_candidates=show_candidates,
+    )
     output = Path(output_path).expanduser().resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     suffix = output.suffix.lower()
@@ -998,21 +1038,7 @@ def render_animation_comparison(
         }
     ):
         figure, axes = _new_figure(plt)
-        figure.suptitle(
-            f"Matched environment seed {pair.env_seed}",
-            fontsize=12,
-            fontweight="bold",
-            y=0.975,
-        )
-        figure.legend(
-            handles=_legend_handles(Line2D, Patch),
-            loc="lower center",
-            ncol=4,
-            frameon=False,
-            fontsize=8,
-            bbox_to_anchor=(0.5, 0.015),
-        )
-        figure.subplots_adjust(left=0.07, right=0.985, top=0.86, bottom=0.19, wspace=0.12)
+        _configure_figure(figure, pair, Line2D, Patch)
 
         def update(frame_index: int):
             for axis in axes:
@@ -1022,7 +1048,6 @@ def render_animation_comparison(
                 pair.baseline,
                 frame_index,
                 is_vrc=False,
-                history_steps=history_steps,
                 tube_stride=tube_stride,
                 force_scale=force_scale,
                 show_candidates=show_candidates,
@@ -1036,7 +1061,6 @@ def render_animation_comparison(
                 pair.vrc,
                 frame_index,
                 is_vrc=True,
-                history_steps=history_steps,
                 tube_stride=tube_stride,
                 force_scale=force_scale,
                 show_candidates=show_candidates,
@@ -1102,7 +1126,10 @@ def build_argument_parser() -> argparse.ArgumentParser:
         "--history-steps",
         type=int,
         default=30,
-        help="observed history window; 0 shows the full history",
+        help=(
+            "deprecated compatibility option; robot history is always shown "
+            "from the start and pedestrian history is hidden"
+        ),
     )
     parser.add_argument("--frame-stride", type=int, default=1)
     parser.add_argument("--tube-stride", type=int, default=5)

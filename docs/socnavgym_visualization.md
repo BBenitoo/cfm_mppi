@@ -103,7 +103,6 @@ options include:
 python -m cfm_mppi.evaluation.visualize_socnavgym TRACE.json \
   --seed 1022 \
   --step 40 \
-  --history-steps 0 \
   --tube-stride 2 \
   --force-scale 0.25 \
   --frame-stride 2 \
@@ -112,8 +111,10 @@ python -m cfm_mppi.evaluation.visualize_socnavgym TRACE.json \
   --animation-format gif
 ```
 
-- `--history-steps 30` is the default rolling history window; `0` shows all
-  observed history.
+- The executed robot path is always shown from its starting position. Pedestrian
+  history trails and pedestrian ID labels are intentionally hidden.
+- `--history-steps` remains accepted for compatibility with older commands but
+  no longer clips the robot path.
 - `--tube-stride 5` draws every fifth temporal ellipse plus the last ellipse.
 - `--force-scale` changes arrow length for display only, not the recorded force.
   Nonzero arrows have a small minimum display length so their direction remains
@@ -126,21 +127,23 @@ python -m cfm_mppi.evaluation.visualize_socnavgym TRACE.json \
 
 ## Reading the figure
 
-Both panels show their decision-time robot pose, observed histories, orange
-robot plans, and gray CV pedestrian forecasts. The right-hand VRC panel also
-overlays the conditioning branch, blue VRC forecast, temporal tube, and force
-arrows.
+Both panels show their decision-time robot pose, complete executed robot path,
+current pedestrian positions, and orange robot plans. The left baseline panel
+shows gray CV pedestrian forecasts. The right-hand VRC panel instead shows the
+conditioning branch, blue VRC forecast, temporal tube, and force arrows.
 
 | Appearance | Meaning |
 | --- | --- |
 | Orange robot disc and dark-orange arrow | Current robot position and heading |
+| Small dark-orange triangle | Robot starting position |
+| Dark-orange trail | Executed robot path from the starting position |
 | Faint orange paths | Candidate CFM robot trajectories |
 | Orange solid path | Final selected MPPI robot prediction |
 | Dark-orange short-dashed path | Selected CFM conditioning branch used to build the VRC tube |
-| Gray dashed paths | No-VRC constant-velocity (`CV`) pedestrian forecasts |
+| Gray dashed paths in the left panel | No-VRC constant-velocity (`CV`) pedestrian forecasts |
 | Blue solid paths | VRC-conditioned pedestrian forecasts for the selected branch |
 | Translucent light-blue ellipses | The selected branch's temporal VRC influence tube |
-| Dark-gray paths and numbered circles | Simulator-observed pedestrian history and current positions |
+| Unnumbered dark-gray-outlined circles | Current simulator-observed pedestrian positions |
 | Magenta arrows | Current nonzero planner-internal VRC force on each pedestrian |
 | Green star/region | Robot goal and goal radius |
 
@@ -155,6 +158,6 @@ simulator dynamics. They are built from the selected pre-MPPI conditioning
 branch and used to form the VRC pedestrian prediction. The evaluator still
 passes only the physical robot command `[v, omega]` (mapped to SocNavGym's
 action format) to the environment; it never applies the recorded VRC force or
-tube directly to SocNavGym pedestrians. Their dark-gray histories always come
-from `env.step()` and therefore represent simulator truth, not an internal
-rollout.
+tube directly to SocNavGym pedestrians. The displayed current pedestrian
+positions come from `env.step()` and therefore represent simulator truth, not
+an internal rollout.

@@ -4,6 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
+import cfm_mppi.evaluation.visualize_socnavgym as visualization
 from cfm_mppi.evaluation.socnavgym_planners import (
     VISUALIZATION_TRACE_SCHEMA,
 )
@@ -209,6 +210,115 @@ class SocNavGymVisualizationTest(unittest.TestCase):
             self.assertEqual(rendered, output.resolve())
             self.assertGreater(output.stat().st_size, 0)
             self.assertEqual(output.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
+
+    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "matplotlib is not installed")
+    def test_panel_style_matches_publication_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pair = load_paired_episodes(
+                _write_document(directory, _paired_document())
+            )
+
+        (
+            plt,
+            _,
+            Line2D,
+            Circle,
+            Ellipse,
+            FancyArrowPatch,
+            Patch,
+        ) = visualization._matplotlib()
+        bounds = visualization._shared_bounds(
+            pair,
+            [1],
+            show_candidates=False,
+        )
+        figure, axes = visualization._new_figure(plt)
+        try:
+            for axis, episode, is_vrc in (
+                (axes[0], pair.baseline, False),
+                (axes[1], pair.vrc, True),
+            ):
+                visualization._draw_panel(
+                    axis,
+                    episode,
+                    1,
+                    is_vrc=is_vrc,
+                    tube_stride=1,
+                    force_scale=0.25,
+                    show_candidates=False,
+                    bounds=bounds,
+                    Circle=Circle,
+                    Ellipse=Ellipse,
+                    FancyArrowPatch=FancyArrowPatch,
+                )
+            visualization._configure_figure(figure, pair, Line2D, Patch)
+
+            left_colors = {line.get_color() for line in axes[0].lines}
+            right_colors = {line.get_color() for line in axes[1].lines}
+            self.assertIn(visualization.COLOR_NO_VRC, left_colors)
+            self.assertNotIn(visualization.COLOR_VRC, left_colors)
+            self.assertIn(visualization.COLOR_VRC, right_colors)
+            self.assertNotIn(visualization.COLOR_NO_VRC, right_colors)
+            self.assertNotIn(visualization.COLOR_HISTORY, left_colors)
+            self.assertNotIn("7", [text.get_text() for text in axes[0].texts])
+
+            history_lines = [
+                line
+                for line in axes[0].lines
+                if line.get_color() == visualization.COLOR_ROBOT_DARK
+                and line.get_alpha() == 0.55
+            ]
+            self.assertEqual(len(history_lines), 1)
+            self.assertEqual(history_lines[0].get_xdata().tolist(), [0.0, 0.2])
+            start_markers = [line for line in axes[0].lines if line.get_marker() == "^"]
+            self.assertEqual(len(start_markers), 1)
+            self.assertEqual(start_markers[0].get_xdata().tolist(), [0.0])
+
+            self.assertEqual(
+                axes[0].get_title(),
+                "Baseline · no VRC\nt = 0.2 s",
+            )
+            self.assertNotIn("step", axes[1].get_title())
+            self.assertAlmostEqual(
+                figure.subplotpars.wspace,
+                visualization.PANEL_WSPACE,
+            )
+            self.assertEqual(
+                tuple(figure.get_size_inches()),
+                visualization.FIGURE_SIZE,
+            )
+            legend = figure.legends[0]
+            legend_labels = [text.get_text() for text in legend.get_texts()]
+            self.assertNotIn("Observed pedestrian history", legend_labels)
+            self.assertIn("Robot history", legend_labels)
+            self.assertIn("Robot start", legend_labels)
+            self.assertTrue(
+                all(
+                    text.get_fontsize() == visualization.LEGEND_FONTSIZE
+                    for text in legend.get_texts()
+                )
+            )
+        finally:
+            plt.close(figure)
+
+    @unittest.skipUnless(MATPLOTLIB_AVAILABLE, "matplotlib is not installed")
+    def test_hidden_history_and_vrc_no_vrc_forecast_do_not_expand_bounds(self) -> None:
+        document = _paired_document()
+        for episode in document["episodes"]:
+            episode["initial_state"]["humans"][0]["position"] = [100.0, 100.0]
+        document["episodes"][1]["steps"][1]["diagnostics"]["visualization"][
+            "pedestrian_prediction_no_vrc"
+        ] = [[[100.0, 100.0], [101.0, 101.0], [102.0, 102.0]]]
+        with tempfile.TemporaryDirectory() as directory:
+            pair = load_paired_episodes(_write_document(directory, document))
+
+        x_limits, y_limits = visualization._shared_bounds(
+            pair,
+            [1],
+            show_candidates=False,
+        )
+        self.assertLess(x_limits[1], 10.0)
+        self.assertLess(y_limits[1], 10.0)
 
     @unittest.skipUnless(
         MATPLOTLIB_AVAILABLE and PILLOW_AVAILABLE,
